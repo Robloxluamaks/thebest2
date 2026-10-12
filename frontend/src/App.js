@@ -7,8 +7,9 @@ import { Button } from "@/components/ui/button";
 import { CampaignPreview } from "@/components/CampaignPreview";
 import { StatsPanel } from "@/components/StatsPanel";
 import { WelcomeScreen } from "@/components/WelcomeScreen";
-import { DAY_LABELS, fmtDur, nextRunInMs, resolveSpintax } from "@/lib/ghost";
-import { Layers, Eye, BarChart3, FolderOpen, Terminal, Trash2, MoonStar } from "lucide-react";
+import { AutoDmPanel } from "@/components/AutoDmPanel";
+import { DAY_LABELS, fmtDur, nextRunInMs, playAlertSound, resolveSpintax, resolveVars } from "@/lib/ghost";
+import { Layers, Eye, BarChart3, FolderOpen, Terminal, Trash2, MoonStar, MessageSquareReply, BellRing } from "lucide-react";
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 
@@ -105,6 +106,7 @@ const PROFILES_KEY = "ghost-send:profiles";
 const SESSION_KEY = "ghost-send:session";
 const ENTERED_KEY = "ghost-send:entered";
 const QUIET_KEY = "ghost-send:quiet";
+const ALERTS_KEY = "ghost-send:alerts";
 
 const TICKER = [
   "kampanie równoległe",
@@ -113,10 +115,10 @@ const TICKER = [
   "warianty spintax",
   "harmonogram wysyłek",
   "historia wysyłek",
-  "custom emoji",
+  "auto-odpowiedzi dm",
+  "alerty webhook",
   "godziny ciszy",
   "przerwy kawowe",
-  "stały odcisk klienta",
 ];
 
 export default function App() {
@@ -140,6 +142,7 @@ export default function App() {
   const [log, setLog] = useState([]);
   const [stats, setStats] = useState({ sent: 0, failed: 0 });
   const [quiet, setQuiet] = useState({ enabled: false, from: "01:00", to: "07:00" });
+  const [alerts, setAlerts] = useState({ sound: true, webhook: "" });
 
   const [profiles, setProfiles] = useState({});
   const [profileName, setProfileName] = useState("");
@@ -169,6 +172,8 @@ export default function App() {
       if (last) applyConfig(JSON.parse(last));
       const q = localStorage.getItem(QUIET_KEY);
       if (q) setQuiet({ enabled: false, from: "01:00", to: "07:00", ...JSON.parse(q) });
+      const a = localStorage.getItem(ALERTS_KEY);
+      if (a) setAlerts({ sound: true, webhook: "", ...JSON.parse(a) });
     } catch {}
     hydratedRef.current = true;
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -188,6 +193,13 @@ export default function App() {
       localStorage.setItem(QUIET_KEY, JSON.stringify(quiet));
     } catch {}
   }, [quiet]);
+
+  useEffect(() => {
+    if (!hydratedRef.current) return;
+    try {
+      localStorage.setItem(ALERTS_KEY, JSON.stringify(alerts));
+    } catch {}
+  }, [alerts]);
 
   const handleEnter = () => {
     try {
@@ -305,6 +317,29 @@ export default function App() {
   const append = (line) =>
     setLog((l) => [`[${new Date().toLocaleTimeString()}] ${line}`, ...l].slice(0, 200));
 
+  const fireAlert = (campaign, status, error) => {
+    if (alerts.sound) playAlertSound();
+    const url = alerts.webhook?.trim();
+    if (url) {
+      axios
+        .post(`${API}/alert/relay`, {
+          url,
+          payload: {
+            event: "campaign_stopped",
+            app: "GHOST.SEND",
+            campaign,
+            status,
+            error: String(error).slice(0, 200),
+            time: new Date().toISOString(),
+          },
+        })
+        .then((r) =>
+          append(r.data?.ok ? "⇡ alert webhook wysłany" : `✗ webhook odpowiedział ${r.data?.status ?? "?"}`)
+        )
+        .catch(() => append("✗ alert webhook nie dotarł"));
+    }
+  };
+
   const updateTarget = (id, patch) =>
     setTargets((ts) => ts.map((t) => (t.id === id ? { ...t, ...patch } : t)));
   const addTarget = () => setTargets((ts) => [...ts, newTarget()]);
@@ -362,7 +397,7 @@ export default function App() {
         await wait(qMs);
         if (stopRef.current) break;
       }
-      const content = resolveSpintax(t.message);
+      const content = resolveVars(resolveSpintax(t.message), sendIdx + 1);
       const tMs = preset.humanTyping ? humanTypingMs(content) : 1500;
       if (preset.typing)
         append(`✎ [${tag}] pisanie (~${(tMs / 1000).toFixed(1)}s)${userBurst ? " · z pauzami" : ""}`);
@@ -408,6 +443,7 @@ export default function App() {
             await wait(backoff);
           } else if (res.status === 401 || res.status === 403) {
             append(`■ [${tag}] token nieprawidłowy/zabroniony — zatrzymuję wszystko`);
+            fireAlert(tag, res.status, res.error);
             stopRef.current = true;
             for (const a of Array.from(waitAbortersRef.current)) a();
             return;
@@ -514,7 +550,7 @@ export default function App() {
               transition={{ delay: 0.5, duration: 0.8 }}
               className="mt-2 max-w-lg font-mono text-xs text-muted-foreground"
             >
-              kampanie discord · harmonogram · spintax · historia wysyłek
+              kampanie discord · harmonogram · spintax · auto-dm · historia wysyłek
             </motion.p>
           </div>
           <motion.div
@@ -534,13 +570,16 @@ export default function App() {
         <Tabs value={activeTab} onValueChange={setActiveTab} className="mt-8">
           <TabsList
             aria-label="Widoki aplikacji"
-            className="grid h-auto w-full grid-cols-2 gap-1 rounded-md border border-border bg-secondary/40 p-1 sm:grid-cols-5"
+            className="grid h-auto w-full grid-cols-2 gap-1 rounded-md border border-border bg-secondary/40 p-1 sm:grid-cols-3 lg:grid-cols-6"
           >
             <TabsTrigger value="campaigns" className="gap-2 py-3" data-testid="tab-campaigns">
               <Layers className="size-4" />Kampanie
             </TabsTrigger>
             <TabsTrigger value="preview" className="gap-2 py-3" data-testid="tab-preview">
               <Eye className="size-4" />Podgląd
+            </TabsTrigger>
+            <TabsTrigger value="autodm" className="gap-2 py-3" data-testid="tab-autodm">
+              <MessageSquareReply className="size-4" />Auto DM
             </TabsTrigger>
             <TabsTrigger value="stats" className="gap-2 py-3" data-testid="tab-stats">
               <BarChart3 className="size-4" />Statystyki
@@ -556,6 +595,15 @@ export default function App() {
             </TabsTrigger>
           </TabsList>
           <form onSubmit={onSubmit} className="mt-6 space-y-6">
+            <TabsContent value="autodm" forceMount>
+              <AutoDmPanel
+                token={token}
+                isBot={isBot}
+                onLog={append}
+                onAlert={fireAlert}
+                onRecord={recordHistory}
+              />
+            </TabsContent>
             <TabsContent value="configs">
               <Panel
                 label={`00 // konfiguracje [${Object.keys(profiles).length}]`}
@@ -727,11 +775,11 @@ export default function App() {
                 }
               >
                 <p className="mb-3 font-mono text-[10px] leading-relaxed text-muted-foreground">
-                  każda kampania działa niezależnie we własnej pętli z własnym opóźnieniem. użyj{" "}
-                  <span className="text-accent">:nazwa_emoji:</span> w wiadomości — custom emoji
-                  rozwiążą się automatycznie po wczytaniu. składnia{" "}
-                  <span className="text-accent">{"{wariant1|wariant2}"}</span> losuje treść przy
-                  każdej wysyłce.
+                  każda kampania działa niezależnie we własnej pętli. składnia{" "}
+                  <span className="text-accent">{"{a|b}"}</span> losuje wariant, zmienne{" "}
+                  <span className="text-accent">{"{data} {czas} {dzien} {licznik} {losowa:1-100}"}</span>{" "}
+                  podstawiają się przy każdej wysyłce,{" "}
+                  <span className="text-accent">:nazwa_emoji:</span> rozwiązuje custom emoji.
                 </p>
                 <div className="space-y-3">
                   {targets.map((t, i) => (
@@ -775,7 +823,7 @@ export default function App() {
                         placeholder="np. 123456789012345678"
                       />
                       <label className="mt-2 block font-mono text-[9px] uppercase tracking-wider text-muted-foreground">
-                        wiadomość <span className="text-accent">{"· {a|b|c} = losowy wariant"}</span>
+                        wiadomość <span className="text-accent">{"· {a|b} + zmienne {data} {licznik}"}</span>
                       </label>
                       <textarea
                         value={t.message}
@@ -783,7 +831,7 @@ export default function App() {
                         rows={2}
                         data-testid={`campaign-message-input-${t.id}`}
                         className="mt-1 w-full resize-none rounded-sm border border-border bg-input px-2 py-1.5 font-mono text-xs text-foreground outline-none focus:border-primary"
-                        placeholder="co wysłać... np. {Cześć|Hej|Siema} wszyscy!"
+                        placeholder="np. {Cześć|Hej}! Dziś {dzien}, wiadomość nr {licznik}"
                       />
                       <div className="mt-2 grid grid-cols-[1fr_auto] items-end gap-3">
                         <div>
@@ -962,6 +1010,50 @@ export default function App() {
                   wiadomości. nie zamykaj karty — zamknięcie zatrzymuje wszystko.
                 </p>
               </Panel>
+
+              <Panel label="04 // alerty o błędach">
+                <p className="mb-3 font-mono text-[10px] leading-relaxed text-muted-foreground">
+                  gdy kampania dostanie błąd krytyczny (401/403) i się zatrzyma — dźwięk alarmu
+                  i/lub POST JSON na Twój webhook (np. Discord webhook, n8n, Zapier).
+                </p>
+                <div className="grid gap-3 sm:grid-cols-[auto_1fr_auto] sm:items-end">
+                  <label className="flex items-center gap-2 rounded-sm border border-border bg-input px-3 py-2 font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
+                    <input
+                      type="checkbox"
+                      checked={alerts.sound}
+                      onChange={(e) => setAlerts({ ...alerts, sound: e.target.checked })}
+                      className="accent-primary"
+                      data-testid="alert-sound-toggle"
+                    />
+                    <BellRing className="size-3.5 text-warn" />
+                    dźwięk
+                  </label>
+                  <div>
+                    <label className="block font-mono text-[9px] uppercase tracking-wider text-muted-foreground">
+                      url webhooka
+                    </label>
+                    <input
+                      value={alerts.webhook}
+                      onChange={(e) => setAlerts({ ...alerts, webhook: e.target.value })}
+                      data-testid="alert-webhook-input"
+                      className="mt-1 w-full rounded-sm border border-border bg-input px-2 py-1.5 font-mono text-xs text-foreground outline-none focus:border-primary"
+                      placeholder="https://discord.com/api/webhooks/..."
+                    />
+                  </div>
+                  <Button
+                    variant="outline"
+                    type="button"
+                    onClick={() => {
+                      fireAlert("test", 0, "testowy alert z GHOST.SEND");
+                      append("♪ test alertu — dźwięk/webhook");
+                    }}
+                    data-testid="alert-test-btn"
+                    className="rounded-sm border border-warn/40 bg-warn/10 px-3 py-1.5 font-mono text-[10px] uppercase tracking-wider text-warn transition-colors hover:bg-warn/20"
+                  >
+                    ♪ test alertu
+                  </Button>
+                </div>
+              </Panel>
             </TabsContent>
             <TabsContent value="preview">
               <CampaignPreview targets={targets} />
@@ -1040,7 +1132,8 @@ function logColor(line) {
   if (line.includes("✗") || line.includes("ZATRZYMANO")) return "text-destructive";
   if (line.includes("⏸") || line.includes("⏱") || line.includes("☕") || line.includes("☾"))
     return "text-warn";
-  if (line.includes("✎") || line.includes("↷")) return "text-accent";
+  if (line.includes("✎") || line.includes("↷") || line.includes("✉") || line.includes("♪") || line.includes("⇡"))
+    return "text-accent";
   if (line.includes("──") || line.includes("▶") || line.includes("■")) return "text-primary/80";
   return "text-muted-foreground";
 }

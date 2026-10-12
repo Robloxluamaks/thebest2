@@ -1,6 +1,6 @@
 import { Hash, MessageSquare, Clock, Repeat2, Bot, CalendarClock, Sparkles } from "lucide-react";
 import { motion } from "framer-motion";
-import { hasSpintax, resolveSpintax, scheduleLabel } from "@/lib/ghost";
+import { hasSpintax, hasVars, resolveSpintax, resolveVars, scheduleLabel } from "@/lib/ghost";
 
 export function CampaignPreview({ targets }) {
   return (
@@ -34,12 +34,12 @@ export function CampaignPreview({ targets }) {
                 <p className={`mt-2 whitespace-pre-wrap break-words text-sm leading-relaxed [overflow-wrap:anywhere] ${target.message.trim() ? "text-foreground" : "text-muted-foreground"}`}>
                   {target.message.trim() ? target.message : "Brak wiadomości"}
                 </p>
-                {hasSpintax(target.message) && (
+                {(hasSpintax(target.message) || hasVars(target.message)) && (
                   <p
                     data-testid={`preview-variant-${target.id}`}
                     className="mt-2 whitespace-pre-wrap break-words border-l-2 border-accent/50 pl-2 text-sm leading-relaxed text-accent [overflow-wrap:anywhere]"
                   >
-                    wylosowany wariant: {resolveSpintax(target.message)}
+                    przykładowa wysyłka: {resolveVars(resolveSpintax(target.message), 1)}
                   </p>
                 )}
               </div>

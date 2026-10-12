@@ -1,4 +1,4 @@
-// Wspólne helpery GHOST.SEND: spintax, harmonogram, formatowanie.
+// Wspólne helpery GHOST.SEND: spintax, zmienne, harmonogram, formatowanie, alerty.
 
 export function resolveSpintax(text) {
   let out = text;
@@ -15,6 +15,26 @@ export function resolveSpintax(text) {
 
 export function hasSpintax(text) {
   return /\{[^{}]*\|[^{}]*\}/.test(text);
+}
+
+const DAYS_PL = ["niedziela", "poniedziałek", "wtorek", "środa", "czwartek", "piątek", "sobota"];
+
+export function resolveVars(text, counter = 1) {
+  const now = new Date();
+  return text
+    .split("{data}").join(now.toLocaleDateString("pl-PL"))
+    .split("{czas}").join(now.toLocaleTimeString("pl-PL", { hour: "2-digit", minute: "2-digit" }))
+    .split("{dzien}").join(DAYS_PL[now.getDay()])
+    .split("{licznik}").join(String(counter))
+    .replace(/\{losowa:(\d+)-(\d+)\}/g, (m, a, b) => {
+      const lo = Number(a);
+      const hi = Number(b);
+      return String(lo + Math.floor(Math.random() * (hi - lo + 1)));
+    });
+}
+
+export function hasVars(text) {
+  return /\{(data|czas|dzien|licznik)\}|\{losowa:\d+-\d+\}/.test(text);
 }
 
 export const DAY_LABELS = [
@@ -64,4 +84,24 @@ export function fmtDur(ms) {
   const h = Math.floor(m / 60);
   if (h < 24) return `${h}h ${m % 60}m`;
   return `${Math.floor(h / 24)}d ${h % 24}h`;
+}
+
+// Dwu-tonowy alarm WebAudio — bez zewnętrznych plików dźwiękowych.
+export function playAlertSound() {
+  try {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    const ctx = new Ctx();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = "square";
+    osc.frequency.value = 880;
+    gain.gain.setValueAtTime(0.07, ctx.currentTime);
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start();
+    osc.frequency.setValueAtTime(622, ctx.currentTime + 0.16);
+    osc.frequency.setValueAtTime(880, ctx.currentTime + 0.32);
+    osc.stop(ctx.currentTime + 0.5);
+    osc.onended = () => ctx.close();
+  } catch {}
 }

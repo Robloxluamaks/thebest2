@@ -9,6 +9,7 @@ import time
 import base64
 import random
 import asyncio
+import uuid
 import logging
 from pathlib import Path
 from pydantic import BaseModel
@@ -317,6 +318,143 @@ async def fetch_emoji_map(data: EmojiFetchInput):
             }
     except Exception as err:
         return {"ok": False, "status": 0, "error": str(err)}
+
+
+class DmMessagesInput(BaseModel):
+    token: str
+    isBot: bool = True
+    channelId: str
+    afterId: Optional[str] = None
+
+
+@api_router.post("/discord/dms")
+async def list_dm_channels(data: EmojiFetchInput):
+    if not data.token:
+        return {"ok": False, "status": 400, "error": "Missing token"}
+    headers = build_headers(data.token, data.isBot)
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(60.0)) as http:
+            me_r = await http.get(f"{DISCORD_API}/users/@me", headers=headers)
+            if me_r.status_code != 200:
+                return {"ok": False, "status": me_r.status_code, "error": me_r.text[:300]}
+            me = me_r.json()
+            ch_r = await http.get(f"{DISCORD_API}/users/@me/channels", headers=headers)
+            if ch_r.status_code != 200:
+                return {"ok": False, "status": ch_r.status_code, "error": ch_r.text[:300]}
+            channels = []
+            for c in ch_r.json():
+                if c.get("type") != 1:
+                    continue
+                name = ", ".join(r.get("username", "?") for r in c.get("recipients", [])) or c.get("name", "")
+                channels.append({"id": c["id"], "lastMessageId": c.get("last_message_id"), "name": name})
+            return {
+                "ok": True,
+                "me": {"id": me["id"], "username": me.get("username", "?")},
+                "channels": channels,
+            }
+    except Exception as err:
+        return {"ok": False, "status": 0, "error": str(err)}
+
+
+@api_router.post("/discord/dm/messages")
+async def dm_messages(data: DmMessagesInput):
+    if not data.token or not re.fullmatch(r"\d{5,25}", data.channelId or ""):
+        return {"ok": False, "status": 400, "error": "Invalid input"}
+    headers = build_headers(data.token, data.isBot, data.channelId)
+    try:
+        params = {"limit": 10}
+        if data.afterId and re.fullmatch(r"\d{5,25}", data.afterId):
+            params["after"] = data.afterId
+        async with httpx.AsyncClient(timeout=httpx.Timeout(60.0)) as http:
+            r = await http.get(
+                f"{DISCORD_API}/channels/{data.channelId}/messages",
+                headers=headers,
+                params=params,
+            )
+            if r.status_code != 200:
+                return {"ok": False, "status": r.status_code, "error": r.text[:300]}
+            msgs = [
+                {
+                    "id": m["id"],
+                    "authorId": m.get("author", {}).get("id"),
+                    "author": m.get("author", {}).get("username", "?"),
+                    "content": (m.get("content") or "")[:500],
+                    "ts": m.get("timestamp"),
+                }
+                for m in r.json()
+            ]
+            msgs.reverse()
+            return {"ok": True, "messages": msgs}
+    except Exception as err:
+        return {"ok": False, "status": 0, "error": str(err)}
+
+
+class AiReplyInput(BaseModel):
+    instruction: str = ""
+    model: str = "gpt-5.4"
+    history: list = []
+    channelKey: str = "dm"
+
+
+@api_router.post("/ai/reply")
+async def ai_reply(data: AiReplyInput):
+    api_key = os.environ.get("EMERGENT_LLM_KEY")
+    if not api_key:
+        return {"ok": False, "error": "brak skonfigurowanego klucza AI"}
+    system = (
+        "Jesteś właścicielem tego konta Discord i odpisujesz na prywatne wiadomości. "
+        "Odpowiadaj krótko (1-2 zdania), naturalnie i po polsku, jak człowiek. "
+        "Nigdy nie ujawniaj, że jesteś AI. Bez list i bez nagłówków. "
+        + (f"Dodatkowe wytyczne od właściciela: {data.instruction}" if data.instruction.strip() else "")
+    )
+    transcript = "\n".join(
+        f"{'Ty' if (m.get('role') == 'assistant') else 'Rozmówca'}: {str(m.get('content', ''))[:300]}"
+        for m in data.history[-8:]
+        if isinstance(m, dict)
+    )
+    if not transcript.strip():
+        return {"ok": False, "error": "brak historii rozmowy"}
+    try:
+        from emergentintegrations.llm.chat import LlmChat, UserMessage, TextDelta, StreamDone
+
+        chat = LlmChat(
+            api_key=api_key,
+            session_id=f"ghostdm-{uuid.uuid4()}",
+            system_message=system,
+        ).with_model("openai", data.model)
+        um = UserMessage(
+            text=f"Ostatnie wiadomości DM:\n{transcript}\n\nNapisz teraz jedną krótką odpowiedź jako 'Ty'."
+        )
+        reply = ""
+        async for ev in chat.stream_message(um):
+            if isinstance(ev, TextDelta):
+                reply += ev.content
+            elif isinstance(ev, StreamDone):
+                break
+        reply = reply.strip()
+        if not reply:
+            return {"ok": False, "error": "pusta odpowiedź AI"}
+        return {"ok": True, "reply": reply[:1900]}
+    except Exception as err:
+        return {"ok": False, "error": str(err)[:300]}
+
+
+class AlertRelayInput(BaseModel):
+    url: str
+    payload: dict
+
+
+@api_router.post("/alert/relay")
+async def alert_relay(data: AlertRelayInput):
+    url = data.url.strip()
+    if not re.match(r"^https?://", url):
+        return {"ok": False, "error": "invalid url"}
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(10.0)) as http:
+            r = await http.post(url, json=data.payload)
+            return {"ok": 200 <= r.status_code < 300, "status": r.status_code}
+    except Exception as err:
+        return {"ok": False, "error": str(err)[:200]}
 
 
 class HistoryEntryIn(BaseModel):

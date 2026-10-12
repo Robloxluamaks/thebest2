@@ -61,6 +61,7 @@ export function AiComposeModal({ open, current, onClose, onApply }) {
           exit={{ opacity: 0 }}
           className="fixed inset-0 z-[90] flex items-center justify-center bg-background/80 p-4 backdrop-blur-sm"
           data-testid="ai-compose-modal"
+          data-lenis-prevent
           onMouseDown={(e) => e.target === e.currentTarget && onClose()}
         >
           <motion.div

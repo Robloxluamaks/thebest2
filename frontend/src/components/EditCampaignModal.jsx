@@ -61,6 +61,7 @@ export function EditCampaignModal({ target, updateTarget, onClose, templates, on
         exit={{ opacity: 0 }}
         className="fixed inset-0 z-[80] flex items-start justify-center overflow-y-auto bg-background/85 p-4 backdrop-blur-sm"
         data-testid="edit-campaign-modal"
+        data-lenis-prevent
         onMouseDown={(e) => e.target === e.currentTarget && onClose()}
       >
         <motion.div

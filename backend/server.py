@@ -16,6 +16,12 @@ from pydantic import BaseModel
 from typing import Optional, Dict
 from datetime import datetime, timezone, timedelta
 import httpx
+from curl_cffi.requests import AsyncSession
+
+# Current-ish desktop build number + matching curl-cffi TLS impersonation targets,
+# aligned 1:1 with CLIENT_PROFILES below (one persona = one UA + one TLS fingerprint).
+CURRENT_BUILD = 342245
+IMPERSONATE = ["chrome124", "chrome124", "chrome136", "chrome136", "chrome124"]
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -150,6 +156,36 @@ class EmojiFetchInput(BaseModel):
     isBot: bool = True
 
 
+def pick_profile_idx(profile_seed: Optional[int]) -> int:
+    return (profile_seed if profile_seed is not None else random.randint(0, 10**6)) % len(CLIENT_PROFILES)
+
+
+def _browser_version(profile: dict) -> str:
+    m = re.search(r"Chrome/([\d.]+)", profile["ua"])
+    return m.group(1) if m else "124.0.0.0"
+
+
+def build_super_properties(profile: dict) -> str:
+    # A real desktop client sends a rich, self-consistent super-properties blob.
+    # We derive browser_user_agent/version from the SAME persona UA and pin a
+    # current build number so the fingerprint stays coherent across requests.
+    props = {
+        **profile["props"],
+        "browser_user_agent": profile["ua"],
+        "browser_version": _browser_version(profile),
+        "client_build_number": CURRENT_BUILD,
+        "native_build_number": CURRENT_BUILD,
+        "client_event_source": None,
+        "design_id": 0,
+        "referrer": "",
+        "referring_domain": "",
+        "referrer_current": "",
+        "referring_domain_current": "",
+        "has_client_mods": False,
+    }
+    return base64.b64encode(json.dumps(props, separators=(",", ":")).encode()).decode()
+
+
 def build_headers(token: str, is_bot: bool, channel_id: Optional[str] = None, profile_seed: Optional[int] = None) -> dict:
     headers = {
         "Authorization": f"Bot {token}" if is_bot else token,
@@ -158,12 +194,9 @@ def build_headers(token: str, is_bot: bool, channel_id: Optional[str] = None, pr
     if is_bot:
         headers["User-Agent"] = "DiscordBot (https://ghost.send, 1.0)"
     else:
-        idx = (profile_seed if profile_seed is not None else random.randint(0, 10**6)) % len(CLIENT_PROFILES)
-        profile = CLIENT_PROFILES[idx]
+        profile = CLIENT_PROFILES[pick_profile_idx(profile_seed)]
         headers["User-Agent"] = profile["ua"]
-        headers["X-Super-Properties"] = base64.b64encode(
-            json.dumps(profile["props"]).encode()
-        ).decode()
+        headers["X-Super-Properties"] = build_super_properties(profile)
         headers["X-Discord-Locale"] = "en-US"
         headers["X-Debug-Options"] = "bugReporterEnabled"
         headers["Accept"] = "*/*"
@@ -176,6 +209,13 @@ def build_headers(token: str, is_bot: bool, channel_id: Optional[str] = None, pr
         if channel_id:
             headers["Referer"] = f"https://discord.com/channels/@me/{channel_id}"
     return headers
+
+
+def impersonate_for(is_bot: bool, profile_seed: Optional[int]) -> Optional[str]:
+    # Match the TLS/JA3 fingerprint to the SAME persona used for headers.
+    if is_bot:
+        return None
+    return IMPERSONATE[pick_profile_idx(profile_seed)]
 
 
 @api_router.get("/")
@@ -206,9 +246,10 @@ async def send_discord_message(data: SendInput):
         content = re.sub(r":([a-zA-Z0-9_]{2,32}):", repl, content)
 
     headers = build_headers(data.token, data.isBot, data.channelId, data.profileSeed)
+    impersonate = impersonate_for(data.isBot, data.profileSeed)
 
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(90.0)) as http:
+        async with AsyncSession(impersonate=impersonate, timeout=90) as http:
             if data.typing:
                 typing_wait_ms = max(400, min(15000, data.typingMs))
                 target = typing_wait_ms / 1000.0
@@ -325,7 +366,7 @@ async def edit_discord_message(data: EditInput):
         return {"ok": False, "status": 400, "error": "Message too long (max 2000)"}
     headers = build_headers(data.token, data.isBot, data.channelId, data.profileSeed)
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as http:
+        async with AsyncSession(impersonate=impersonate_for(data.isBot, data.profileSeed), timeout=30) as http:
             r = await http.patch(
                 f"{DISCORD_API}/channels/{data.channelId}/messages/{data.messageId}",
                 headers=headers,
@@ -352,7 +393,7 @@ async def delete_discord_message(data: DeleteInput):
         return {"ok": False, "status": 400, "error": "Invalid input"}
     headers = build_headers(data.token, data.isBot, data.channelId, data.profileSeed)
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as http:
+        async with AsyncSession(impersonate=impersonate_for(data.isBot, data.profileSeed), timeout=30) as http:
             r = await http.delete(
                 f"{DISCORD_API}/channels/{data.channelId}/messages/{data.messageId}",
                 headers=headers,

@@ -1,0 +1,30 @@
+{
+  "summary": "Iteration 2: Verified 6 new Discord REST endpoints + Edit Campaign modal + backup accounts + mask panel. Backend: 23/23 pytest passed (AiCompose kept skipped — key budget still exhausted per it1). All new endpoints (channel-info, find-channel, messages, react, relationships, active-threads) correctly validate input (400) and return clean JSON (ok:false, status 401) with FAKE.TOKEN.xyz — never HTTP 500. Frontend: edit-campaign-modal opens from campaign-edit-btn-{id}; all 16 advanced testids render after toggling edit-adv-enabled; all 5 sub-controls (forum-parent/msg, react-emojis, autoedit-delay/text) reveal on their parent toggles. Basic fields (name, channel, message, delay) + advanced values (jitter, react-emojis) PERSIST across close via edit-done-btn and reopen (name='TEST_Camp', jitter='25', react='🔥,👍'). edit-campaign-close (X) also closes modal. Backup accounts: add via backup-add-btn creates entry in backup-list with masked token ('••••aaaa'), backup-delete-{id} removes it. Mask toggles (shuffle/skip/idle/typos) all flip aria-checked false↔true; mask-skip reveals mask-skip-pct input accepting value 15.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "Mask panel persistence (localStorage)", "issue": "Race between the hydration useEffect (line 249) and the per-field save useEffects (line 306 for mask, likely similar for others). On mount both effects run; the save effect fires with the stale DEFAULT_MASK closure AFTER hydratedRef flips to true inside the load effect, overwriting the just-loaded value in LS. Repro: toggle mask-shuffle ON (LS={shuffle:true}), reload page — LS becomes {shuffle:false} even before re-entering the panel, and aria-checked reads false on mount.", "selector": "[data-testid=\"mask-shuffle\"]", "priority": "MEDIUM"}
+    ],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "test_report_links": ["/app/backend/tests/backend_test.py", "/app/test_reports/pytest/pytest_results.xml"],
+  "action_items": [
+    "Fix mask (and likely alerts/quiet/templates/backups/session) localStorage hydration race in App.js: either (a) use lazy init in useState so DEFAULT values start from LS synchronously, or (b) set hydratedRef.current = true BEFORE calling setMask in the load effect AND skip the very first run of each save effect using an additional per-key ref, or (c) call all setters first then set hydratedRef in a microtask after state has committed.",
+    "LLM budget for EMERGENT_LLM_KEY is still a concern (from it1) — not retested here."
+  ],
+  "critical_code_review_comments": [
+    "server.py now at ~947 lines — recommend splitting into routers/discord.py, routers/ai.py, routers/history.py (code review rule >700 lines).",
+    "All 6 new Discord endpoints follow the correct pattern: Pydantic validation, regex ID checks, try/except around httpx, consistent {ok, status, error} shape — never 500.",
+    "App.js has 6 near-identical save useEffects guarded by hydratedRef — classic candidate for a usePersistedState hook; also eliminates the current hydration race.",
+    "EditCampaignModal.jsx: well-structured, all advanced controls have data-testids, Toggle switches expose aria-checked (great for testing)."
+  ],
+  "updated_files": ["/app/backend/tests/backend_test.py", "/app/test_reports/iteration_2.json"],
+  "success_rate": {"backend": "100% (23/23 non-AI; AI blocked by budget)", "frontend": "95% — all modal + backup + mask interactions work; only mask persistence after reload is broken"},
+  "test_credentials": "FAKE.TOKEN.xyz for Discord endpoints; 401 expected.",
+  "seed_data_creation": "None persisted — backup added+deleted in-session only.",
+  "retest_needed": true,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Backend is solid. If main agent fixes the localStorage hydration race, re-test by: (1) toggling mask-shuffle on, (2) full page reload, (3) click enter-panel-btn, (4) read [data-testid=mask-shuffle] aria-checked — must be 'true'. Also verify LS 'ghost-send:mask' value stays as toggled across reload without ever flipping back to defaults. Advanced edit modal testids all confirmed present — no need to recheck unless EditCampaignModal.jsx changes.",
+  "rca of the issue": "RCA (mask persistence race): In App.js, state is initialized with DEFAULT_MASK (line 230). An effect at line 249 reads LS and calls setMask(loaded) THEN sets hydratedRef.current=true (line 266). The sibling save effect at line 306 runs after the load effect on the same mount tick; its [mask] closure still captures DEFAULT_MASK (setMask is async), hydratedRef is already true, so it writes DEFAULT_MASK to LS — overwriting the user's saved value. The subsequent re-render triggered by setMask SHOULD run save again with the loaded value, but in practice the LS ends up with defaults (observed: LS={shuffle:false} immediately after reload, before re-entering panel). Fix: use lazy useState init that reads LS synchronously, OR gate every save effect on an initial-render ref (e.g., firstRunRef) in addition to hydratedRef."
+}

@@ -51,6 +51,17 @@ const DEFAULT_MASK = {
   typos: false,
 };
 
+// Synchronous localStorage read for lazy useState init (avoids hydration races
+// where a save-effect fires with stale default state and overwrites saved data).
+const readLS = (key, fallback) => {
+  try {
+    const v = localStorage.getItem(key);
+    return v ? JSON.parse(v) : fallback;
+  } catch {
+    return fallback;
+  }
+};
+
 const embedHasContent = (e) =>
   !!(e?.enabled && (e.title.trim() || e.description.trim() || e.imageUrl.trim()));
 
@@ -210,24 +221,24 @@ export default function App() {
   const waitAbortersRef = useRef(new Set());
   const [log, setLog] = useState([]);
   const [stats, setStats] = useState({ sent: 0, failed: 0 });
-  const [quiet, setQuiet] = useState({ enabled: false, from: "01:00", to: "07:00" });
-  const [alerts, setAlerts] = useState({ sound: true, webhook: "", logs: false });
+  const [quiet, setQuiet] = useState(() => ({ enabled: false, from: "01:00", to: "07:00", ...readLS(QUIET_KEY, {}) }));
+  const [alerts, setAlerts] = useState(() => ({ sound: true, webhook: "", logs: false, ...readLS(ALERTS_KEY, {}) }));
   const [identity, setIdentity] = useState(null);
   const [checking, setChecking] = useState(false);
 
-  const [profiles, setProfiles] = useState({});
+  const [profiles, setProfiles] = useState(() => readLS(PROFILES_KEY, {}));
   const [profileName, setProfileName] = useState("");
   const [selectedProfile, setSelectedProfile] = useState("");
   const [includeToken, setIncludeToken] = useState(false);
-  const [templates, setTemplates] = useState([]);
+  const [templates, setTemplates] = useState(() => readLS(TEMPLATES_KEY, []));
   const [tplName, setTplName] = useState("");
   const [tplText, setTplText] = useState("");
   const [aiTargetId, setAiTargetId] = useState(null);
   const [editTargetId, setEditTargetId] = useState(null);
-  const [backups, setBackups] = useState([]);
+  const [backups, setBackups] = useState(() => readLS(BACKUPS_KEY, []));
   const [backupToken, setBackupToken] = useState("");
   const [backupLabel, setBackupLabel] = useState("");
-  const [mask, setMask] = useState(DEFAULT_MASK);
+  const [mask, setMask] = useState(() => ({ ...DEFAULT_MASK, ...readLS(MASK_KEY, {}) }));
   const hydratedRef = useRef(false);
   const channelMetaRef = useRef({});
   const stoppedGroupsRef = useRef(new Set());
@@ -248,20 +259,8 @@ export default function App() {
 
   useEffect(() => {
     try {
-      const raw = localStorage.getItem(PROFILES_KEY);
-      if (raw) setProfiles(JSON.parse(raw));
       const last = localStorage.getItem(SESSION_KEY);
       if (last) applyConfig(JSON.parse(last));
-      const q = localStorage.getItem(QUIET_KEY);
-      if (q) setQuiet({ enabled: false, from: "01:00", to: "07:00", ...JSON.parse(q) });
-      const a = localStorage.getItem(ALERTS_KEY);
-      if (a) setAlerts({ sound: true, webhook: "", logs: false, ...JSON.parse(a) });
-      const tpl = localStorage.getItem(TEMPLATES_KEY);
-      if (tpl) setTemplates(JSON.parse(tpl));
-      const bk = localStorage.getItem(BACKUPS_KEY);
-      if (bk) setBackups(JSON.parse(bk));
-      const mk = localStorage.getItem(MASK_KEY);
-      if (mk) setMask({ ...DEFAULT_MASK, ...JSON.parse(mk) });
     } catch {}
     hydratedRef.current = true;
     // eslint-disable-next-line react-hooks/exhaustive-deps

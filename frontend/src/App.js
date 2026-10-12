@@ -9,8 +9,9 @@ import { StatsPanel } from "@/components/StatsPanel";
 import { WelcomeScreen } from "@/components/WelcomeScreen";
 import { AutoDmPanel } from "@/components/AutoDmPanel";
 import { AiComposeModal } from "@/components/AiComposeModal";
-import { DAY_LABELS, fmtDur, nextRunInMs, playAlertSound, resolveSpintax, resolveVars } from "@/lib/ghost";
-import { Layers, Eye, BarChart3, FolderOpen, Terminal, Trash2, MoonStar, MessageSquareReply, BellRing, CopyPlus, BadgeCheck, Sparkles, SlidersHorizontal, BookMarked } from "lucide-react";
+import { EditCampaignModal } from "@/components/EditCampaignModal";
+import { DAY_LABELS, fmtDur, nextRunInMs, playAlertSound, resolveSpintax, resolveVars, scheduleLabel } from "@/lib/ghost";
+import { Layers, Eye, BarChart3, FolderOpen, Terminal, Trash2, MoonStar, MessageSquareReply, BellRing, CopyPlus, BadgeCheck, Sparkles, SlidersHorizontal, BookMarked, Pencil, Users, ShieldAlert } from "lucide-react";
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 
@@ -33,8 +34,22 @@ const newTarget = () => ({
     stopAfterMin: 0,
     autoEdit: { enabled: false, delaySec: 30, text: "" },
     autoDelete: { enabled: false, afterSec: 60 },
+    restoreChannels: false,
+    failGroup: false,
+    group: "",
+    activeChannel: { enabled: false, minNew: 1 },
+    autoAcceptFriends: false,
+    autoReact: { enabled: false, emojis: "" },
+    forumReply: { enabled: false, parentId: "", message: "" },
   },
 });
+
+const DEFAULT_MASK = {
+  shuffle: false,
+  randomSkipPct: 0,
+  idleBreaks: false,
+  typos: false,
+};
 
 const embedHasContent = (e) =>
   !!(e?.enabled && (e.title.trim() || e.description.trim() || e.imageUrl.trim()));
@@ -118,6 +133,19 @@ function humanTypingMs(text) {
   return Math.min(14000, Math.round(base + (Math.random() * 2 - 1) * variance));
 }
 
+// Introduce a believable human typo: swap two adjacent letters in a random word.
+function makeTypo(text) {
+  if (!text || text.length < 4) return text;
+  const chars = text.split("");
+  const letterIdx = chars
+    .map((c, i) => (/[a-zA-Ząćęłńóśźż]/i.test(c) ? i : -1))
+    .filter((i) => i >= 0 && i < chars.length - 1);
+  if (letterIdx.length < 2) return text;
+  const i = letterIdx[Math.floor(Math.random() * (letterIdx.length - 1))];
+  [chars[i], chars[i + 1]] = [chars[i + 1], chars[i]];
+  return chars.join("");
+}
+
 const PROFILES_KEY = "ghost-send:profiles";
 const SESSION_KEY = "ghost-send:session";
 const ENTERED_KEY = "ghost-send:entered";
@@ -125,6 +153,8 @@ const QUIET_KEY = "ghost-send:quiet";
 const ALERTS_KEY = "ghost-send:alerts";
 const DAILY_KEY = "ghost-send:daily";
 const TEMPLATES_KEY = "ghost-send:templates";
+const BACKUPS_KEY = "ghost-send:backups";
+const MASK_KEY = "ghost-send:mask";
 
 const readDaily = () => {
   const today = new Date().toDateString();
@@ -193,7 +223,14 @@ export default function App() {
   const [tplName, setTplName] = useState("");
   const [tplText, setTplText] = useState("");
   const [aiTargetId, setAiTargetId] = useState(null);
+  const [editTargetId, setEditTargetId] = useState(null);
+  const [backups, setBackups] = useState([]);
+  const [backupToken, setBackupToken] = useState("");
+  const [backupLabel, setBackupLabel] = useState("");
+  const [mask, setMask] = useState(DEFAULT_MASK);
   const hydratedRef = useRef(false);
+  const channelMetaRef = useRef({});
+  const stoppedGroupsRef = useRef(new Set());
 
   useEffect(() => {
     const lenis = new Lenis({ lerp: 0.09, smoothWheel: true });
@@ -221,6 +258,10 @@ export default function App() {
       if (a) setAlerts({ sound: true, webhook: "", logs: false, ...JSON.parse(a) });
       const tpl = localStorage.getItem(TEMPLATES_KEY);
       if (tpl) setTemplates(JSON.parse(tpl));
+      const bk = localStorage.getItem(BACKUPS_KEY);
+      if (bk) setBackups(JSON.parse(bk));
+      const mk = localStorage.getItem(MASK_KEY);
+      if (mk) setMask({ ...DEFAULT_MASK, ...JSON.parse(mk) });
     } catch {}
     hydratedRef.current = true;
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -255,6 +296,20 @@ export default function App() {
     } catch {}
   }, [templates]);
 
+  useEffect(() => {
+    if (!hydratedRef.current) return;
+    try {
+      localStorage.setItem(BACKUPS_KEY, JSON.stringify(backups));
+    } catch {}
+  }, [backups]);
+
+  useEffect(() => {
+    if (!hydratedRef.current) return;
+    try {
+      localStorage.setItem(MASK_KEY, JSON.stringify(mask));
+    } catch {}
+  }, [mask]);
+
   const onSaveTemplate = () => {
     const name = tplName.trim();
     const text = tplText.trim();
@@ -269,6 +324,20 @@ export default function App() {
   };
 
   const onDeleteTemplate = (id) => setTemplates((ts) => ts.filter((t) => t.id !== id));
+
+  const onAddBackup = () => {
+    const tok = backupToken.trim();
+    if (!tok) {
+      append("✗ wklej token konta zapasowego");
+      return;
+    }
+    setBackups((b) => [...b, { id: Math.random().toString(36).slice(2, 9), label: backupLabel.trim() || `konto ${b.length + 1}`, token: tok }]);
+    setBackupToken("");
+    setBackupLabel("");
+    append("✓ dodano konto zapasowe (tylko w przeglądarce)");
+  };
+
+  const onDeleteBackup = (id) => setBackups((b) => b.filter((x) => x.id !== id));
 
   const insertTemplate = (targetId, text) => {
     setTargets((ts) =>
@@ -303,6 +372,9 @@ export default function App() {
             ...(t.advanced || {}),
             autoEdit: { ...newTarget().advanced.autoEdit, ...(t.advanced?.autoEdit || {}) },
             autoDelete: { ...newTarget().advanced.autoDelete, ...(t.advanced?.autoDelete || {}) },
+            activeChannel: { ...newTarget().advanced.activeChannel, ...(t.advanced?.activeChannel || {}) },
+            autoReact: { ...newTarget().advanced.autoReact, ...(t.advanced?.autoReact || {}) },
+            forumReply: { ...newTarget().advanced.forumReply, ...(t.advanced?.forumReply || {}) },
           },
           id: Math.random().toString(36).slice(2, 9),
         }))
@@ -468,6 +540,9 @@ export default function App() {
           ...src.advanced,
           autoEdit: { ...src.advanced.autoEdit },
           autoDelete: { ...src.advanced.autoDelete },
+          activeChannel: { ...src.advanced.activeChannel },
+          autoReact: { ...src.advanced.autoReact },
+          forumReply: { ...src.advanced.forumReply },
         },
       };
       return [...ts.slice(0, i + 1), copy, ...ts.slice(i + 1)];
@@ -531,7 +606,7 @@ export default function App() {
     }
   };
 
-  const scheduleAutoActions = (t, seed, msgId, tag) => {
+  const scheduleAutoActions = (t, seed, msgId, tag, curToken, chanId) => {
     if (!msgId || !t.advanced?.enabled) return;
     const userMode = !isBot;
     const adv = t.advanced;
@@ -541,8 +616,8 @@ export default function App() {
         const edited = resolveVars(resolveSpintax(adv.autoEdit.text), 0);
         axios
           .post(`${API}/discord/edit`, {
-            token,
-            channelId: t.channelId,
+            token: curToken,
+            channelId: chanId,
             messageId: msgId,
             message: edited,
             isBot,
@@ -557,8 +632,8 @@ export default function App() {
       setTimeout(() => {
         axios
           .post(`${API}/discord/delete`, {
-            token,
-            channelId: t.channelId,
+            token: curToken,
+            channelId: chanId,
             messageId: msgId,
             isBot,
             profileSeed: userMode ? seed : undefined,
@@ -567,6 +642,25 @@ export default function App() {
           .catch(() => {});
       }, delay);
     }
+  };
+
+  // Validate and switch to the next untried backup token. Returns new token or null.
+  const trySwitchBackup = async (tag, triedSet) => {
+    for (const b of backups) {
+      if (!b.token || triedSet.has(b.token)) continue;
+      triedSet.add(b.token);
+      try {
+        const me = (await axios.post(`${API}/discord/me`, { token: b.token, isBot })).data;
+        if (me.ok) {
+          append(`⇄ [${tag}] przełączono na konto zapasowe "${b.label || me.username}"`);
+          return b.token;
+        }
+        append(`✗ [${tag}] konto zapasowe "${b.label || "?"}" nieważne — próbuję następne`);
+      } catch {
+        /* try next */
+      }
+    }
+    return null;
   };
 
   const runCampaign = async (t, seed) => {
@@ -580,7 +674,21 @@ export default function App() {
     let adaptiveMult = 1;
     let sentCount = 0;
     let sendIdx = 0;
+    let curToken = token;
+    let curChannelId = t.channelId;
+    const triedBackups = new Set([token]);
     let nextCoffee = preset.coffee ? randInt(preset.coffee.every[0], preset.coffee.every[1]) : Infinity;
+
+    // Resolve channel metadata (name + guild + last message) for restore / active-channel.
+    const meta = channelMetaRef.current[t.id] || {};
+    if (adv.enabled && (adv.restoreChannels || adv.activeChannel?.enabled) && !meta.guildId) {
+      try {
+        const info = (await axios.post(`${API}/discord/channel-info`, { token: curToken, channelId: curChannelId, isBot })).data;
+        if (info.ok) {
+          channelMetaRef.current[t.id] = { name: info.name, guildId: info.guildId, lastSeen: info.lastMessageId };
+        }
+      } catch {}
+    }
 
     if (adv.enabled && adv.startDelaySec > 0) {
       append(`⏱ [${tag}] opóźnienie startu ${fmtDur(adv.startDelaySec * 1000)}`);
@@ -592,6 +700,10 @@ export default function App() {
     }
     do {
       if (stopRef.current) break;
+      if (adv.enabled && adv.failGroup && adv.group && stoppedGroupsRef.current.has(adv.group)) {
+        append(`■ [${tag}] grupa "${adv.group}" zatrzymana przez błąd innej kampanii`);
+        break;
+      }
       // Stop After — message count / time limit
       if (adv.enabled && adv.stopAfterCount > 0 && sendIdx >= adv.stopAfterCount) {
         append(`■ [${tag}] osiągnięto limit ${adv.stopAfterCount} wiadomości — koniec kampanii`);
@@ -607,6 +719,13 @@ export default function App() {
         await wait(qMs);
         if (stopRef.current) break;
       }
+      // Anti-detect: occasional idle break (~5% chance) to mimic distraction.
+      if (mask.idleBreaks && Math.random() < 0.05) {
+        const pause = randInt(120, 180) * 1000;
+        append(`☕ [${tag}] losowa przerwa (symulacja rozproszenia) ${fmtDur(pause)}`);
+        await wait(pause);
+        if (stopRef.current) break;
+      }
       if (t.maxPerDay > 0) {
         const d = readDaily();
         if ((d.counts[tag] || 0) >= t.maxPerDay) {
@@ -618,15 +737,42 @@ export default function App() {
           if (stopRef.current) break;
         }
       }
-      const content = resolveVars(resolveSpintax(t.message), sendIdx + 1);
+      // Active Channel Sending — only send if enough new messages since last send.
+      if (adv.enabled && adv.activeChannel?.enabled) {
+        try {
+          const m = channelMetaRef.current[t.id] || {};
+          const resM = (await axios.post(`${API}/discord/messages`, { token: curToken, channelId: curChannelId, afterId: m.lastSeen, limit: 50, isBot })).data;
+          if (resM.ok) {
+            const fresh = resM.messages.filter((mm) => mm.authorId && !mm.bot);
+            if (resM.messages.length) channelMetaRef.current[t.id] = { ...m, lastSeen: resM.messages[resM.messages.length - 1].id };
+            if (fresh.length < Math.max(1, adv.activeChannel.minNew)) {
+              append(`⏭ [${tag}] aktywny kanał: ${fresh.length}/${adv.activeChannel.minNew} nowych — pomijam ten cykl`);
+              if (!t.loop || stopRef.current) break;
+              await wait(userMode ? humanDelayMs(Math.max(1000, t.delaySec * 1000), effJitter) : jitter(Math.max(1000, t.delaySec * 1000), effJitter));
+              continue;
+            }
+          }
+        } catch {}
+      }
+      // Anti-detect: random skip.
+      if (mask.randomSkipPct > 0 && Math.random() * 100 < mask.randomSkipPct) {
+        append(`⏭ [${tag}] losowe pominięcie wysyłki (maskowanie)`);
+        if (!t.loop || stopRef.current) break;
+        await wait(userMode ? humanDelayMs(Math.max(1000, t.delaySec * 1000) * adaptiveMult, effJitter) : jitter(Math.max(1000, t.delaySec * 1000) * adaptiveMult, effJitter));
+        continue;
+      }
+      const realContent = resolveVars(resolveSpintax(t.message), sendIdx + 1);
+      // Anti-detect: human typo + self-correct (~25% of sends when enabled).
+      const doTypo = mask.typos && realContent.trim().length >= 4 && Math.random() < 0.25;
+      const content = doTypo ? makeTypo(realContent) : realContent;
       const tMs = preset.humanTyping ? humanTypingMs(content || t.embed.description) : 1500;
       if (preset.typing)
         append(`✎ [${tag}] pisanie (~${(tMs / 1000).toFixed(1)}s)${userBurst ? " · z pauzami" : ""}`);
       try {
-        const res = (
+        let res = (
           await axios.post(`${API}/discord/send`, {
-            token,
-            channelId: t.channelId,
+            token: curToken,
+            channelId: curChannelId,
             message: content,
             isBot,
             typing: preset.typing,
@@ -644,13 +790,37 @@ export default function App() {
               : undefined,
           })
         ).data;
+        // Auto-restore deleted/recreated channel on "Unknown Channel".
+        if (!res.ok && adv.enabled && adv.restoreChannels && (res.status === 404 || /10003|Unknown Channel/i.test(String(res.error)))) {
+          const m = channelMetaRef.current[t.id] || {};
+          if (m.guildId && m.name) {
+            const fc = (await axios.post(`${API}/discord/find-channel`, { token: curToken, guildId: m.guildId, name: m.name, isBot })).data;
+            if (fc.ok && fc.found) {
+              curChannelId = fc.channelId;
+              updateTarget(t.id, { channelId: fc.channelId });
+              append(`↺ [${tag}] odtworzono kanał "${m.name}" → ${fc.channelId.slice(-6)} — ponawiam`);
+              res = (await axios.post(`${API}/discord/send`, { token: curToken, channelId: curChannelId, message: content, isBot, typing: false, profileSeed: userMode ? seed : undefined })).data;
+            }
+          }
+        }
         if (res.ok) {
           setStats((s) => ({ ...s, sent: s.sent + 1 }));
-          append(`✓ [${tag}] wysłano`);
-          recordHistory(tag, t.channelId, content || `[embed] ${t.embed.title}`, true, res.status);
+          append(`✓ [${tag}] wysłano${doTypo ? " (z literówką — poprawiam)" : ""}`);
+          recordHistory(tag, curChannelId, content || `[embed] ${t.embed.title}`, true, res.status);
           bumpDaily(tag);
-          scheduleAutoActions(t, seed, res.id, tag);
-          if (adaptiveMult > 1) adaptiveMult = Math.max(1, adaptiveMult * 0.85); // slowly recover
+          // Self-correct the typo via edit after a short, human pause.
+          if (doTypo && res.id) {
+            const fix = Math.round(randInt(2, 5) * 1000);
+            setTimeout(() => {
+              axios
+                .post(`${API}/discord/edit`, { token: curToken, channelId: curChannelId, messageId: res.id, message: realContent, isBot, profileSeed: userMode ? seed : undefined })
+                .then((r) => r.data?.ok && append(`✎ [${tag}] poprawiono literówkę`))
+                .catch(() => {});
+            }, fix);
+          } else {
+            scheduleAutoActions(t, seed, res.id, tag, curToken, curChannelId);
+          }
+          if (adaptiveMult > 1) adaptiveMult = Math.max(1, adaptiveMult * 0.85);
           sentCount++;
           sendIdx++;
           if (userMode && preset.coffee && sentCount >= nextCoffee) {
@@ -664,7 +834,7 @@ export default function App() {
         } else {
           setStats((s) => ({ ...s, failed: s.failed + 1 }));
           append(`✗ [${tag}] ${res.status}: ${String(res.error).slice(0, 80)}`);
-          recordHistory(tag, t.channelId, content || `[embed] ${t.embed.title}`, false, res.status, res.error);
+          recordHistory(tag, curChannelId, content || `[embed] ${t.embed.title}`, false, res.status, res.error);
           if (res.status === 1015) {
             const backoff = Math.max(300000, Math.round((res.retryAfter ?? 300) * 1000));
             append(`⏸ [${tag}] cloudflare 1015 · przerwa ${(backoff / 1000).toFixed(0)}s (długi backoff)`);
@@ -682,8 +852,19 @@ export default function App() {
             }
             await wait(backoff);
           } else if (res.status === 401 || res.status === 403) {
-            append(`■ [${tag}] token nieprawidłowy/zabroniony — zatrzymuję wszystko`);
+            // Try backup accounts before giving up.
+            const next = await trySwitchBackup(tag, triedBackups);
+            if (next) {
+              curToken = next;
+              continue; // retry with backup token
+            }
+            append(`■ [${tag}] token nieprawidłowy i brak ważnych kont zapasowych`);
             fireAlert(tag, res.status, res.error);
+            if (adv.enabled && adv.failGroup && adv.group) {
+              stoppedGroupsRef.current.add(adv.group);
+              append(`■ [${tag}] zatrzymuję grupę "${adv.group}"`);
+              return;
+            }
             stopRef.current = true;
             for (const a of Array.from(waitAbortersRef.current)) a();
             return;
@@ -692,7 +873,7 @@ export default function App() {
       } catch (err) {
         setStats((s) => ({ ...s, failed: s.failed + 1 }));
         append(`✗ [${tag}] ${err instanceof Error ? err.message : String(err)}`);
-        recordHistory(tag, t.channelId, content, false, 0, err instanceof Error ? err.message : String(err));
+        recordHistory(tag, curChannelId, content, false, 0, err instanceof Error ? err.message : String(err));
       }
       if (!t.loop || stopRef.current) break;
       let baseMs = Math.max(1000, t.delaySec * 1000) * adaptiveMult;
@@ -707,9 +888,82 @@ export default function App() {
     append(`■ [${tag}] zatrzymano`);
   };
 
-  const runScheduled = async (t) => {
+  // Background pollers for auxiliary USER-token features (run alongside campaigns).
+  const runAuxiliaries = async (t) => {
+    const tag = t.name.trim() || `#${t.channelId.slice(-6)}`;
+    const adv = t.advanced || {};
+    if (!adv.enabled || isBot) return;
+    const meta = channelMetaRef.current[t.id] || {};
+    let guildId = meta.guildId;
+    if ((adv.autoReact?.enabled || adv.forumReply?.enabled) && !guildId) {
+      try {
+        const info = (await axios.post(`${API}/discord/channel-info`, { token, channelId: t.channelId, isBot })).data;
+        if (info.ok) {
+          guildId = info.guildId;
+          channelMetaRef.current[t.id] = { ...meta, name: info.name, guildId: info.guildId };
+        }
+      } catch {}
+    }
+    let lastReact = null;
+    const seenThreads = new Set();
+    while (!stopRef.current) {
+      await wait(randInt(20, 40) * 1000);
+      if (stopRef.current) break;
+      // Auto-accept friend requests
+      if (adv.autoAcceptFriends) {
+        try {
+          const r = (await axios.post(`${API}/discord/relationships`, { token, accept: true })).data;
+          if (r.ok && r.accepted?.length) append(`🤝 [${tag}] zaakceptowano zaproszenia: ${r.accepted.join(", ")}`);
+        } catch {}
+      }
+      // Auto-react to new messages in the channel
+      if (adv.autoReact?.enabled && adv.autoReact.emojis.trim()) {
+        try {
+          const rm = (await axios.post(`${API}/discord/messages`, { token, channelId: t.channelId, afterId: lastReact, limit: 20, isBot })).data;
+          if (rm.ok && rm.messages.length) {
+            lastReact = rm.messages[rm.messages.length - 1].id;
+            const emojis = adv.autoReact.emojis.split(",").map((e) => e.trim()).filter(Boolean);
+            for (const mm of rm.messages.filter((x) => !x.bot)) {
+              const emoji = emojis[Math.floor(Math.random() * emojis.length)];
+              await axios.post(`${API}/discord/react`, { token, channelId: t.channelId, messageId: mm.id, emoji, isBot }).catch(() => {});
+              await wait(randInt(1, 3) * 1000);
+            }
+            if (rm.messages.length) append(`❤ [${tag}] auto-reakcje na ${rm.messages.length} wiadomości`);
+          }
+        } catch {}
+      }
+      // Forum auto-reply to new threads
+      if (adv.forumReply?.enabled && adv.forumReply.parentId.trim() && adv.forumReply.message.trim() && guildId) {
+        try {
+          const at = (await axios.post(`${API}/discord/active-threads`, { token, guildId, parentId: adv.forumReply.parentId.trim(), isBot })).data;
+          if (at.ok) {
+            for (const th of at.threads) {
+              if (seenThreads.has(th.id)) continue;
+              seenThreads.add(th.id);
+              const msg = resolveVars(resolveSpintax(adv.forumReply.message), 1);
+              await axios.post(`${API}/discord/send`, { token, channelId: th.id, message: msg, isBot, typing: true, typingMs: 1500, profileSeed: seed0(t) }).catch(() => {});
+              append(`💬 [${tag}] odpowiedź na nowy wątek forum "${th.name}"`);
+              await wait(randInt(3, 8) * 1000);
+            }
+          }
+        } catch {}
+      }
+    }
+  };
+
+  const seed0 = (t) => Math.abs((t.id || "x").split("").reduce((a, c) => a + c.charCodeAt(0), 0)) % 1000000;
+
+  const runScheduled = async (t, staggerMs = 0) => {
     const tag = t.name.trim() || `#${t.channelId.slice(-6)}`;
     const seed = Math.floor(Math.random() * 10 ** 6);
+    // Anti-detect: initial human reaction delay + optional shuffle stagger
+    // (avoids firing all channels in perfect parallel at t=0).
+    const initial = randInt(2, 8) * 1000 + staggerMs;
+    if (initial > 0) {
+      append(`⏱ [${tag}] wejście za ${fmtDur(initial)} (naturalne rozłożenie startu)`);
+      await wait(initial);
+      if (stopRef.current) return;
+    }
     while (!stopRef.current) {
       const ms = nextRunInMs(t.schedule);
       if (ms > 0) {
@@ -733,7 +987,7 @@ export default function App() {
       setActiveTab("logs");
       return;
     }
-    const valid = targets.filter(
+    let valid = targets.filter(
       (t) => t.channelId.trim() && (t.message.trim() || embedHasContent(t.embed))
     );
     if (valid.length === 0) {
@@ -743,11 +997,27 @@ export default function App() {
     }
     setRunning(true);
     stopRef.current = false;
+    stoppedGroupsRef.current = new Set();
+    channelMetaRef.current = {};
     setStats({ sent: 0, failed: 0 });
-    append(`▶ start ${valid.length} kampanii · tryb: ${STEALTH[stealth].label}${isBot ? "" : " · USER stealth+"}`);
+    // Anti-detect: randomize campaign order so channels aren't hit in a fixed sequence.
+    if (mask.shuffle) {
+      valid = [...valid].sort(() => Math.random() - 0.5);
+      append("🔀 maskowanie: losowa kolejność kanałów");
+    }
+    const maskBits = [
+      mask.shuffle && "losowa kolejność",
+      mask.randomSkipPct > 0 && `pomijanie ${mask.randomSkipPct}%`,
+      mask.idleBreaks && "przerwy idle",
+      mask.typos && "literówki+autokorekta",
+    ].filter(Boolean);
+    append(`▶ start ${valid.length} kampanii · tryb: ${STEALTH[stealth].label}${isBot ? "" : " · USER stealth+"}${maskBits.length ? " · maska: " + maskBits.join(", ") : ""}`);
+    if (backups.length) append(`⇄ ${backups.length} kont(o) zapasowe gotowe do przełączenia`);
     setActiveTab("logs");
     try {
-      await Promise.all(valid.map((t) => runScheduled(t)));
+      const jobs = valid.map((t, i) => runScheduled(t, mask.shuffle ? randInt(0, 4) * 1000 * i : 0));
+      const aux = valid.map((t) => runAuxiliaries(t));
+      await Promise.all([...jobs, ...aux]);
       append("■ wszystkie kampanie zatrzymane");
     } finally {
       setRunning(false);
@@ -1096,34 +1366,62 @@ export default function App() {
                   podstawiają się przy każdej wysyłce,{" "}
                   <span className="text-accent">:nazwa_emoji:</span> rozwiązuje custom emoji.
                 </p>
-                <div className="space-y-3">
-                  {targets.map((t, i) => (
-                    <div
-                      key={t.id}
-                      data-testid={`campaign-card-${t.id}`}
-                      className="group relative rounded-md border border-border bg-background/40 p-3 transition-colors hover:border-primary/40"
-                    >
-                      <div className="mb-2 flex items-center justify-between">
-                        <div className="flex items-center gap-2">
-                          <span className="font-mono text-[10px] uppercase tracking-wider text-primary">
-                            #{String(i + 1).padStart(2, "0")}
-                          </span>
-                          <input
-                            value={t.name}
-                            onChange={(e) => updateTarget(t.id, { name: e.target.value })}
-                            data-testid={`campaign-name-input-${t.id}`}
-                            className="rounded-sm border border-transparent bg-transparent px-1 py-0.5 font-mono text-xs text-foreground outline-none hover:border-border focus:border-primary"
-                            placeholder="nazwa kampanii"
-                          />
+                <div className="space-y-2">
+                  {targets.map((t, i) => {
+                    const adv = t.advanced || {};
+                    const advCount = adv.enabled
+                      ? [adv.restoreChannels, adv.failGroup, adv.activeChannel?.enabled, adv.autoAcceptFriends, adv.autoReact?.enabled, adv.forumReply?.enabled, adv.autoEdit?.enabled, adv.autoDelete?.enabled, adv.adaptive, adv.startDelaySec > 0, adv.jitterPct > 0, adv.stopAfterCount > 0, adv.stopAfterMin > 0].filter(Boolean).length
+                      : 0;
+                    return (
+                      <div
+                        key={t.id}
+                        data-testid={`campaign-card-${t.id}`}
+                        className="group flex items-center gap-3 rounded-md border border-border bg-background/40 p-3 transition-colors hover:border-primary/40"
+                      >
+                        <span className="font-mono text-[10px] uppercase tracking-wider text-primary">
+                          #{String(i + 1).padStart(2, "0")}
+                        </span>
+                        <div className="min-w-0 flex-1">
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <span className="truncate font-mono text-sm font-semibold text-foreground">
+                              {t.name.trim() || "kampania"}
+                            </span>
+                            {adv.enabled && advCount > 0 && (
+                              <span className="rounded-sm border border-accent/40 bg-accent/10 px-1.5 py-0.5 font-mono text-[9px] text-accent">
+                                zaawansowane ·{advCount}
+                              </span>
+                            )}
+                            {t.embed.enabled && (
+                              <span className="rounded-sm border border-border px-1.5 py-0.5 font-mono text-[9px] text-muted-foreground">
+                                embed
+                              </span>
+                            )}
+                          </div>
+                          <p className="mt-0.5 truncate font-mono text-[11px] text-muted-foreground">
+                            {t.channelId.trim() ? `kanał …${t.channelId.slice(-6)}` : "brak kanału"} · {t.delaySec}s ·{" "}
+                            {t.loop ? "pętla" : "raz"} · {scheduleLabel(t.schedule)}
+                          </p>
+                          <p className="mt-0.5 truncate font-mono text-[11px] text-foreground/70">
+                            {t.message.trim() || (t.embed.enabled ? "[embed]" : "— brak treści —")}
+                          </p>
                         </div>
-                        <div className="flex items-center gap-3">
+                        <div className="flex shrink-0 items-center gap-1.5">
+                          <Button
+                            variant="outline"
+                            type="button"
+                            onClick={() => setEditTargetId(t.id)}
+                            data-testid={`campaign-edit-btn-${t.id}`}
+                            className="rounded-sm border border-primary/40 bg-primary/10 px-3 py-1.5 font-mono text-[10px] uppercase tracking-wider text-primary transition-colors hover:bg-primary/20"
+                          >
+                            <Pencil className="size-3" /> edytuj
+                          </Button>
                           <Button
                             variant="outline"
                             type="button"
                             onClick={() => duplicateTarget(t.id)}
                             data-testid={`campaign-duplicate-btn-${t.id}`}
                             title="Duplikuj kampanię"
-                            className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground opacity-0 transition-opacity hover:text-primary hover:underline group-hover:opacity-100"
+                            className="rounded-sm border border-border px-2 py-1.5 font-mono text-[10px] text-muted-foreground transition-colors hover:text-primary"
                           >
                             <CopyPlus className="size-3" />
                           </Button>
@@ -1133,367 +1431,14 @@ export default function App() {
                             onClick={() => removeTarget(t.id)}
                             disabled={targets.length === 1}
                             data-testid={`campaign-remove-btn-${t.id}`}
-                            className="font-mono text-[10px] uppercase tracking-wider text-destructive opacity-0 transition-opacity hover:underline disabled:opacity-0 group-hover:opacity-100"
+                            className="rounded-sm border border-destructive/40 px-2 py-1.5 font-mono text-[10px] text-destructive transition-colors disabled:opacity-30"
                           >
-                            usuń
+                            ✕
                           </Button>
                         </div>
                       </div>
-                      <label className="block font-mono text-[9px] uppercase tracking-wider text-muted-foreground">
-                        id kanału
-                      </label>
-                      <input
-                        value={t.channelId}
-                        onChange={(e) => updateTarget(t.id, { channelId: e.target.value })}
-                        data-testid={`campaign-channel-input-${t.id}`}
-                        className="mt-1 w-full rounded-sm border border-border bg-input px-2 py-1.5 font-mono text-xs text-foreground outline-none focus:border-primary"
-                        placeholder="np. 123456789012345678"
-                      />
-                      <div className="mt-2 flex items-center justify-between gap-2">
-                        <label className="block font-mono text-[9px] uppercase tracking-wider text-muted-foreground">
-                          wiadomość <span className="text-accent">{"· {a|b} + zmienne {data} {licznik}"}</span>
-                        </label>
-                        <div className="flex items-center gap-1.5">
-                          {templates.length > 0 && (
-                            <select
-                              value=""
-                              onChange={(e) => {
-                                const tpl = templates.find((x) => x.id === e.target.value);
-                                if (tpl) insertTemplate(t.id, tpl.text);
-                                e.target.value = "";
-                              }}
-                              data-testid={`campaign-template-select-${t.id}`}
-                              className="rounded-sm border border-border bg-input px-1.5 py-1 font-mono text-[10px] text-muted-foreground outline-none focus:border-primary"
-                            >
-                              <option value="">▾ szablon</option>
-                              {templates.map((tpl) => (
-                                <option key={tpl.id} value={tpl.id}>{tpl.name}</option>
-                              ))}
-                            </select>
-                          )}
-                          <Button
-                            variant="outline"
-                            type="button"
-                            onClick={() => setAiTargetId(t.id)}
-                            data-testid={`campaign-ai-btn-${t.id}`}
-                            title="Napisz lub ulepsz wiadomość z pomocą AI"
-                            className="rounded-sm border border-accent/40 bg-accent/10 px-2 py-1 font-mono text-[10px] uppercase tracking-wider text-accent transition-colors hover:bg-accent/20"
-                          >
-                            <Sparkles className="size-3" /> AI
-                          </Button>
-                        </div>
-                      </div>
-                      <textarea
-                        value={t.message}
-                        onChange={(e) => updateTarget(t.id, { message: e.target.value })}
-                        rows={2}
-                        data-testid={`campaign-message-input-${t.id}`}
-                        className="mt-1 w-full resize-none rounded-sm border border-border bg-input px-2 py-1.5 font-mono text-xs text-foreground outline-none focus:border-primary"
-                        placeholder="np. {Cześć|Hej}! Dziś {dzien}, wiadomość nr {licznik} — puste, gdy sam embed"
-                      />
-                      <div className="mt-2 flex flex-wrap items-end gap-3">
-                        <div className="min-w-32 flex-1">
-                          <label className="block font-mono text-[9px] uppercase tracking-wider text-muted-foreground">
-                            opóźnienie (sekundy)
-                          </label>
-                          <input
-                            type="number"
-                            min={1}
-                            value={t.delaySec}
-                            onChange={(e) =>
-                              updateTarget(t.id, { delaySec: Math.max(1, Number(e.target.value) || 1) })
-                            }
-                            data-testid={`campaign-delay-input-${t.id}`}
-                            className="mt-1 w-full rounded-sm border border-border bg-input px-2 py-1.5 font-mono text-xs text-foreground outline-none focus:border-primary"
-                          />
-                        </div>
-                        <div className="w-28">
-                          <label className="block font-mono text-[9px] uppercase tracking-wider text-muted-foreground">
-                            limit/dzień (0=bez)
-                          </label>
-                          <input
-                            type="number"
-                            min={0}
-                            value={t.maxPerDay}
-                            onChange={(e) =>
-                              updateTarget(t.id, { maxPerDay: Math.max(0, Number(e.target.value) || 0) })
-                            }
-                            data-testid={`campaign-dailylimit-input-${t.id}`}
-                            className="mt-1 w-full rounded-sm border border-border bg-input px-2 py-1.5 font-mono text-xs text-foreground outline-none focus:border-primary"
-                          />
-                        </div>
-                        <label className="flex items-center gap-2 rounded-sm border border-border bg-input px-3 py-2 font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
-                          <input
-                            type="checkbox"
-                            checked={t.loop}
-                            onChange={(e) => updateTarget(t.id, { loop: e.target.checked })}
-                            className="accent-primary"
-                            data-testid={`campaign-loop-toggle-${t.id}`}
-                          />
-                          pętla
-                        </label>
-                      </div>
-
-                      <div className="mt-2 rounded-sm border border-border bg-input/30 p-2.5">
-                        <label className="flex items-center gap-2 font-mono text-[9px] uppercase tracking-wider text-muted-foreground">
-                          <input
-                            type="checkbox"
-                            checked={t.embed.enabled}
-                            onChange={(e) => updateTarget(t.id, { embed: { ...t.embed, enabled: e.target.checked } })}
-                            className="accent-primary"
-                            data-testid={`campaign-embed-toggle-${t.id}`}
-                          />
-                          embed (bogata karta: tytuł, opis, kolor, obrazek)
-                        </label>
-                        {t.embed.enabled && (
-                          <div className="mt-2 space-y-2" data-testid={`campaign-embed-editor-${t.id}`}>
-                            <div className="grid gap-2 sm:grid-cols-[1fr_auto]">
-                              <input
-                                value={t.embed.title}
-                                onChange={(e) => updateTarget(t.id, { embed: { ...t.embed, title: e.target.value } })}
-                                data-testid={`campaign-embed-title-${t.id}`}
-                                className="rounded-sm border border-border bg-input px-2 py-1.5 font-mono text-xs text-foreground outline-none focus:border-primary"
-                                placeholder="tytuł embedu"
-                              />
-                              <input
-                                type="color"
-                                value={t.embed.color}
-                                onChange={(e) => updateTarget(t.id, { embed: { ...t.embed, color: e.target.value } })}
-                                data-testid={`campaign-embed-color-${t.id}`}
-                                title="Kolor paska embedu"
-                                className="h-8 w-12 cursor-pointer rounded-sm border border-border bg-input p-0.5"
-                              />
-                            </div>
-                            <textarea
-                              value={t.embed.description}
-                              onChange={(e) => updateTarget(t.id, { embed: { ...t.embed, description: e.target.value } })}
-                              rows={2}
-                              data-testid={`campaign-embed-description-${t.id}`}
-                              className="w-full resize-none rounded-sm border border-border bg-input px-2 py-1.5 font-mono text-xs text-foreground outline-none focus:border-primary"
-                              placeholder="opis embedu — działa {a|b} i zmienne"
-                            />
-                            <input
-                              value={t.embed.imageUrl}
-                              onChange={(e) => updateTarget(t.id, { embed: { ...t.embed, imageUrl: e.target.value } })}
-                              data-testid={`campaign-embed-image-${t.id}`}
-                              className="w-full rounded-sm border border-border bg-input px-2 py-1.5 font-mono text-xs text-foreground outline-none focus:border-primary"
-                              placeholder="url obrazka (https://...)"
-                            />
-                          </div>
-                        )}
-                      </div>
-
-                      <div className="mt-2 rounded-sm border border-border bg-input/30 p-2.5" data-testid={`campaign-advanced-${t.id}`}>
-                        <label className="flex items-center gap-2 font-mono text-[9px] uppercase tracking-wider text-muted-foreground">
-                          <input
-                            type="checkbox"
-                            checked={t.advanced.enabled}
-                            onChange={(e) => updateTarget(t.id, { advanced: { ...t.advanced, enabled: e.target.checked } })}
-                            className="accent-primary"
-                            data-testid={`campaign-advanced-toggle-${t.id}`}
-                          />
-                          <SlidersHorizontal className="size-3 text-accent" />
-                          ustawienia zaawansowane
-                        </label>
-                        {t.advanced.enabled && (
-                          <div className="mt-2 space-y-2.5" data-testid={`campaign-advanced-body-${t.id}`}>
-                            <div className="grid gap-2 sm:grid-cols-3">
-                              <div>
-                                <label className="block font-mono text-[9px] uppercase tracking-wider text-muted-foreground">
-                                  start delay (s)
-                                </label>
-                                <input
-                                  type="number"
-                                  min={0}
-                                  value={t.advanced.startDelaySec}
-                                  onChange={(e) => updateTarget(t.id, { advanced: { ...t.advanced, startDelaySec: Math.max(0, Number(e.target.value) || 0) } })}
-                                  data-testid={`campaign-adv-startdelay-${t.id}`}
-                                  className="mt-1 w-full rounded-sm border border-border bg-input px-2 py-1.5 font-mono text-xs text-foreground outline-none focus:border-primary"
-                                />
-                              </div>
-                              <div>
-                                <label className="block font-mono text-[9px] uppercase tracking-wider text-muted-foreground">
-                                  jitter (%) 0=auto
-                                </label>
-                                <input
-                                  type="number"
-                                  min={0}
-                                  max={100}
-                                  value={t.advanced.jitterPct}
-                                  onChange={(e) => updateTarget(t.id, { advanced: { ...t.advanced, jitterPct: Math.max(0, Math.min(100, Number(e.target.value) || 0)) } })}
-                                  data-testid={`campaign-adv-jitter-${t.id}`}
-                                  className="mt-1 w-full rounded-sm border border-border bg-input px-2 py-1.5 font-mono text-xs text-foreground outline-none focus:border-primary"
-                                />
-                              </div>
-                              <label className="flex items-end gap-2 pb-1.5 font-mono text-[10px] text-muted-foreground">
-                                <input
-                                  type="checkbox"
-                                  checked={t.advanced.adaptive}
-                                  onChange={(e) => updateTarget(t.id, { advanced: { ...t.advanced, adaptive: e.target.checked } })}
-                                  className="accent-primary"
-                                  data-testid={`campaign-adv-adaptive-${t.id}`}
-                                />
-                                adaptacja limitu
-                              </label>
-                            </div>
-                            <div className="grid gap-2 sm:grid-cols-2">
-                              <div>
-                                <label className="block font-mono text-[9px] uppercase tracking-wider text-muted-foreground">
-                                  stop po X wiadomościach (0=bez)
-                                </label>
-                                <input
-                                  type="number"
-                                  min={0}
-                                  value={t.advanced.stopAfterCount}
-                                  onChange={(e) => updateTarget(t.id, { advanced: { ...t.advanced, stopAfterCount: Math.max(0, Number(e.target.value) || 0) } })}
-                                  data-testid={`campaign-adv-stopcount-${t.id}`}
-                                  className="mt-1 w-full rounded-sm border border-border bg-input px-2 py-1.5 font-mono text-xs text-foreground outline-none focus:border-primary"
-                                />
-                              </div>
-                              <div>
-                                <label className="block font-mono text-[9px] uppercase tracking-wider text-muted-foreground">
-                                  stop po X minutach (0=bez)
-                                </label>
-                                <input
-                                  type="number"
-                                  min={0}
-                                  value={t.advanced.stopAfterMin}
-                                  onChange={(e) => updateTarget(t.id, { advanced: { ...t.advanced, stopAfterMin: Math.max(0, Number(e.target.value) || 0) } })}
-                                  data-testid={`campaign-adv-stopmin-${t.id}`}
-                                  className="mt-1 w-full rounded-sm border border-border bg-input px-2 py-1.5 font-mono text-xs text-foreground outline-none focus:border-primary"
-                                />
-                              </div>
-                            </div>
-                            <div className="rounded-sm border border-border/60 bg-background/40 p-2">
-                              <label className="flex items-center gap-2 font-mono text-[9px] uppercase tracking-wider text-muted-foreground">
-                                <input
-                                  type="checkbox"
-                                  checked={t.advanced.autoEdit.enabled}
-                                  onChange={(e) => updateTarget(t.id, { advanced: { ...t.advanced, autoEdit: { ...t.advanced.autoEdit, enabled: e.target.checked } } })}
-                                  className="accent-primary"
-                                  data-testid={`campaign-adv-autoedit-toggle-${t.id}`}
-                                />
-                                auto-edycja wysłanej wiadomości
-                              </label>
-                              {t.advanced.autoEdit.enabled && (
-                                <div className="mt-2 grid gap-2 sm:grid-cols-[6rem_1fr]">
-                                  <input
-                                    type="number"
-                                    min={2}
-                                    value={t.advanced.autoEdit.delaySec}
-                                    onChange={(e) => updateTarget(t.id, { advanced: { ...t.advanced, autoEdit: { ...t.advanced.autoEdit, delaySec: Math.max(2, Number(e.target.value) || 2) } } })}
-                                    data-testid={`campaign-adv-autoedit-delay-${t.id}`}
-                                    title="po ilu sekundach edytować"
-                                    className="rounded-sm border border-border bg-input px-2 py-1.5 font-mono text-xs text-foreground outline-none focus:border-primary"
-                                  />
-                                  <input
-                                    value={t.advanced.autoEdit.text}
-                                    onChange={(e) => updateTarget(t.id, { advanced: { ...t.advanced, autoEdit: { ...t.advanced.autoEdit, text: e.target.value } } })}
-                                    data-testid={`campaign-adv-autoedit-text-${t.id}`}
-                                    placeholder="nowa treść po edycji (działa {a|b})"
-                                    className="rounded-sm border border-border bg-input px-2 py-1.5 font-mono text-xs text-foreground outline-none focus:border-primary"
-                                  />
-                                </div>
-                              )}
-                            </div>
-                            <label className="flex items-center gap-2 font-mono text-[10px] text-muted-foreground">
-                              <input
-                                type="checkbox"
-                                checked={t.advanced.autoDelete.enabled}
-                                onChange={(e) => updateTarget(t.id, { advanced: { ...t.advanced, autoDelete: { ...t.advanced.autoDelete, enabled: e.target.checked } } })}
-                                className="accent-primary"
-                                data-testid={`campaign-adv-autodelete-toggle-${t.id}`}
-                              />
-                              auto-usuń po
-                              <input
-                                type="number"
-                                min={2}
-                                value={t.advanced.autoDelete.afterSec}
-                                onChange={(e) => updateTarget(t.id, { advanced: { ...t.advanced, autoDelete: { ...t.advanced.autoDelete, afterSec: Math.max(2, Number(e.target.value) || 2) } } })}
-                                data-testid={`campaign-adv-autodelete-sec-${t.id}`}
-                                className="w-20 rounded-sm border border-border bg-input px-2 py-1 font-mono text-xs text-foreground outline-none focus:border-primary"
-                              />
-                              sek.
-                            </label>
-                            <p className="font-mono text-[9px] leading-snug text-warn">
-                              ⚠ auto-edycja/usuwanie wymaga tokena z prawem do wiadomości; botem działa tylko dla własnych wiadomości.
-                            </p>
-                          </div>
-                        )}
-                      </div>
-
-                      <div className="mt-2 grid gap-3 sm:grid-cols-[1fr_auto]">
-                        <div>
-                          <label className="block font-mono text-[9px] uppercase tracking-wider text-muted-foreground">
-                            start kampanii
-                          </label>
-                          <select
-                            value={t.schedule.mode}
-                            onChange={(e) =>
-                              updateTarget(t.id, { schedule: { ...t.schedule, mode: e.target.value } })
-                            }
-                            data-testid={`campaign-schedule-mode-${t.id}`}
-                            className="mt-1 w-full rounded-sm border border-border bg-input px-2 py-1.5 font-mono text-xs text-foreground outline-none focus:border-primary"
-                          >
-                            <option value="now">natychmiast</option>
-                            <option value="at">o godzinie</option>
-                            <option value="weekly">w wybranych dniach tygodnia</option>
-                          </select>
-                        </div>
-                        {t.schedule.mode !== "now" && (
-                          <div>
-                            <label className="block font-mono text-[9px] uppercase tracking-wider text-muted-foreground">
-                              godzina
-                            </label>
-                            <input
-                              type="time"
-                              value={t.schedule.time}
-                              onChange={(e) =>
-                                updateTarget(t.id, { schedule: { ...t.schedule, time: e.target.value } })
-                              }
-                              data-testid={`campaign-schedule-time-${t.id}`}
-                              className="mt-1 w-full rounded-sm border border-border bg-input px-2 py-1.5 font-mono text-xs text-foreground outline-none focus:border-primary"
-                            />
-                          </div>
-                        )}
-                      </div>
-                      {t.schedule.mode === "weekly" && (
-                        <div className="mt-2 flex flex-wrap gap-1" data-testid={`campaign-schedule-days-${t.id}`}>
-                          {DAY_LABELS.map(([label, val]) => {
-                            const active = t.schedule.days.includes(val);
-                            return (
-                              <Button
-                                variant="outline"
-                                key={val}
-                                type="button"
-                                onClick={() =>
-                                  updateTarget(t.id, {
-                                    schedule: {
-                                      ...t.schedule,
-                                      days: active
-                                        ? t.schedule.days.filter((d) => d !== val)
-                                        : [...t.schedule.days, val],
-                                    },
-                                  })
-                                }
-                                data-testid={`campaign-schedule-day-${t.id}-${val}`}
-                                className={`rounded-sm border px-2.5 py-1 font-mono text-[10px] uppercase tracking-wider transition-colors ${
-                                  active
-                                    ? "border-primary/50 bg-primary/10 text-primary"
-                                    : "border-border bg-input text-muted-foreground hover:border-primary/30"
-                                }`}
-                              >
-                                {label}
-                              </Button>
-                            );
-                          })}
-                          <span className="ml-1 self-center font-mono text-[9px] text-muted-foreground">
-                            bez pętli: wysyłka powtarza się w każdy zaznaczony dzień
-                          </span>
-                        </div>
-                      )}
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               </Panel>
 
@@ -1626,6 +1571,100 @@ export default function App() {
                   wysyłaj dziennik aktywności na webhook (zdarzenia ✓/✗ w czasie rzeczywistym)
                 </label>
               </Panel>
+
+              <Panel label={`05 // konta zapasowe [${backups.length}]`}>
+                <p className="mb-3 font-mono text-[10px] leading-relaxed text-muted-foreground">
+                  jeśli bieżące konto zostanie unieważnione (401/403), kampania automatycznie przełącza
+                  się na kolejne ważne konto zapasowe wg kolejności. tokeny zapisują się{" "}
+                  <span className="text-warn">tylko w Twojej przeglądarce</span> — nigdy w bazie.
+                </p>
+                <div className="grid gap-2 sm:grid-cols-[1fr_2fr_auto]">
+                  <input
+                    value={backupLabel}
+                    onChange={(e) => setBackupLabel(e.target.value)}
+                    placeholder="etykieta (np. konto #2)"
+                    data-testid="backup-label-input"
+                    className="rounded-sm border border-border bg-input px-2 py-1.5 font-mono text-xs text-foreground outline-none focus:border-primary"
+                  />
+                  <input
+                    type="password"
+                    value={backupToken}
+                    onChange={(e) => setBackupToken(e.target.value)}
+                    placeholder="token konta zapasowego"
+                    data-testid="backup-token-input"
+                    className="rounded-sm border border-border bg-input px-2 py-1.5 font-mono text-xs text-foreground outline-none focus:border-primary"
+                  />
+                  <Button
+                    variant="outline"
+                    type="button"
+                    onClick={onAddBackup}
+                    data-testid="backup-add-btn"
+                    className="rounded-sm border border-primary/40 bg-primary/10 px-3 py-1.5 font-mono text-[10px] uppercase tracking-wider text-primary transition-colors hover:bg-primary/20"
+                  >
+                    <Users className="size-3" /> dodaj
+                  </Button>
+                </div>
+                {backups.length > 0 && (
+                  <div className="mt-3 space-y-1.5" data-testid="backup-list">
+                    {backups.map((b, i) => (
+                      <div key={b.id} data-testid={`backup-item-${b.id}`} className="flex items-center gap-2 rounded-sm border border-border bg-input/40 px-2.5 py-1.5">
+                        <span className="font-mono text-[10px] text-primary">#{i + 1}</span>
+                        <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-foreground">{b.label}</span>
+                        <span className="font-mono text-[10px] text-muted-foreground">••••{b.token.slice(-4)}</span>
+                        <Button variant="outline" type="button" onClick={() => onDeleteBackup(b.id)} data-testid={`backup-delete-${b.id}`} className="font-mono text-[10px] uppercase tracking-wider text-destructive hover:underline">
+                          ✕
+                        </Button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </Panel>
+
+              <Panel label="06 // maskowanie anti-detekcja">
+                <p className="mb-3 font-mono text-[10px] leading-relaxed text-muted-foreground">
+                  dodatkowe zachowania utrudniające oznaczenie konta jako spam. łączą się z trybem
+                  stealth, godzinami ciszy i przerwami kawowymi. (sieć/proxy/TLS są poza przeglądarką —
+                  dla pełnej izolacji używaj proxy rezydencjalnego per konto.)
+                </p>
+                <div className="space-y-1">
+                  <MaskRow
+                    title="losowa kolejność kanałów"
+                    desc="startuje kampanie w losowej kolejności i rozkłada starty w czasie — zamiast równoległego strzału w t=0"
+                    checked={mask.shuffle}
+                    onChange={(v) => setMask({ ...mask, shuffle: v })}
+                    testId="mask-shuffle"
+                  />
+                  <MaskRow
+                    title="losowe pomijanie wysyłek"
+                    desc="z zadanym prawdopodobieństwem pomija pojedynczą wysyłkę (ludzie nie są idealnie regularni)"
+                    checked={mask.randomSkipPct > 0}
+                    onChange={(v) => setMask({ ...mask, randomSkipPct: v ? 15 : 0 })}
+                    testId="mask-skip"
+                    extra={
+                      mask.randomSkipPct > 0 && (
+                        <div className="flex items-center gap-1">
+                          <input type="number" min={0} max={90} value={mask.randomSkipPct} onChange={(e) => setMask({ ...mask, randomSkipPct: Math.max(0, Math.min(90, Number(e.target.value) || 0)) })} data-testid="mask-skip-pct" className="w-14 rounded-sm border border-border bg-input px-2 py-1 text-right font-mono text-[11px] text-foreground outline-none focus:border-primary" />
+                          <span className="font-mono text-[9px] text-muted-foreground">%</span>
+                        </div>
+                      )
+                    }
+                  />
+                  <MaskRow
+                    title="symulacja obecności (przerwy idle)"
+                    desc="losowe krótkie przerwy ~2-3 min (5% szans na cykl) jak odejście od klawiatury"
+                    checked={mask.idleBreaks}
+                    onChange={(v) => setMask({ ...mask, idleBreaks: v })}
+                    testId="mask-idle"
+                  />
+                  <MaskRow
+                    title="losowe literówki + autokorekta"
+                    desc="czasem wysyła wiadomość z drobną literówką, a po 2-5 s poprawia ją edycją — bardzo ludzkie"
+                    checked={mask.typos}
+                    onChange={(v) => setMask({ ...mask, typos: v })}
+                    testId="mask-typos"
+                  />
+                </div>
+              </Panel>
             </TabsContent>
             <TabsContent value="preview">
               <CampaignPreview targets={targets} />
@@ -1702,6 +1741,17 @@ export default function App() {
         onClose={() => setAiTargetId(null)}
         onApply={(text, replace) => aiTargetId && onAiApply(aiTargetId, text, replace)}
       />
+
+      {editTargetId && (
+        <EditCampaignModal
+          target={targets.find((t) => t.id === editTargetId)}
+          updateTarget={updateTarget}
+          templates={templates}
+          onInsertTemplate={insertTemplate}
+          onOpenAi={(id) => setAiTargetId(id)}
+          onClose={() => setEditTargetId(null)}
+        />
+      )}
     </div>
   );
 }
@@ -1715,6 +1765,30 @@ function logColor(line) {
     return "text-accent";
   if (line.includes("──") || line.includes("▶") || line.includes("■")) return "text-primary/80";
   return "text-muted-foreground";
+}
+
+function MaskRow({ title, desc, checked, onChange, testId, extra }) {
+  return (
+    <div className="flex items-start justify-between gap-4 border-t border-border/60 py-2.5" data-testid={`${testId}-row`}>
+      <div className="min-w-0">
+        <span className="font-mono text-xs font-bold text-foreground">{title}</span>
+        <p className="mt-0.5 font-mono text-[10px] leading-snug text-muted-foreground">{desc}</p>
+      </div>
+      <div className="flex shrink-0 items-center gap-2">
+        {extra}
+        <button
+          type="button"
+          role="switch"
+          aria-checked={checked}
+          onClick={() => onChange(!checked)}
+          data-testid={testId}
+          className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors ${checked ? "bg-primary" : "bg-muted"}`}
+        >
+          <span className={`inline-block h-4 w-4 transform rounded-full bg-background shadow transition-transform ${checked ? "translate-x-6" : "translate-x-1"}`} />
+        </button>
+      </div>
+    </div>
+  );
 }
 
 function Panel({ label, action, children }) {

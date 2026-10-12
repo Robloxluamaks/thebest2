@@ -202,3 +202,51 @@
 ## agent_communication:
 ##     -agent: "main"
 ##     -message: "Dodano paczki funkcji. Backend: /api/ai/compose, /api/discord/edit, /api/discord/delete (send zwraca id), /api/history/heatmap. Frontend: modal AI, szablony, ustawienia zaawansowane, heatmapa, webhook logi. Prosze przetestowac backend (edit/delete zwroca 401 z fake tokenem - to OK, wazna jest walidacja i ksztalt odpowiedzi; compose wymaga EMERGENT_LLM_KEY i musi zwrocic text). Frontend: otwieranie modalu AI i generowanie, zapis/wstawienie szablonu, wlaczanie ustawien zaawansowanych, heatmapa w Statystykach. Token Discord tylko w przegladarce - do testow wysylki uzyj fake tokena, oczekiwany 401 w dzienniku."
+
+## --- Iteration 2: Pełne opcje zaawansowane (autosender.lol style) ---
+## backend:
+##   - task: "Advanced Discord REST endpoints (channel-info, find-channel, messages, react, relationships, active-threads)"
+##     implemented: true
+##     working: "NA"
+##     file: "backend/server.py"
+##     needs_retesting: true
+##     priority: "high"
+##     status_history:
+##         -working: "NA"
+##         -agent: "main"
+##         -comment: "6 nowych endpointow proxy do Discord. Curl z fake tokenem: wszystkie zwracaja czysty 401 JSON (bez 500), zle ID -> 400. Walidacja regex channelId/guildId/messageId."
+## frontend:
+##   - task: "Edit Campaign modal with full advanced settings"
+##     implemented: true
+##     working: "NA"
+##     file: "frontend/src/components/EditCampaignModal.jsx, App.js"
+##     needs_retesting: true
+##     priority: "high"
+##     status_history:
+##         -working: "NA"
+##         -agent: "main"
+##         -comment: "Kampanie teraz kompaktowe karty + przycisk 'edytuj' (campaign-edit-btn-{id}) otwiera modal edit-campaign-modal z pelna edycja + sekcja edit-advanced (toggle edit-adv-enabled -> edit-advanced-body) ze wszystkimi opcjami (jitter, start delay, adaptive, restore, failgroup, stop after, active channel, friends, forum, react, auto-edit, auto-delete). Zweryfikowane e2e: modal otwiera sie, advanced rozwija."
+##   - task: "Backup accounts panel + runtime switching"
+##     implemented: true
+##     working: "NA"
+##     file: "frontend/src/App.js"
+##     needs_retesting: true
+##     priority: "high"
+##     status_history:
+##         -working: "NA"
+##         -agent: "main"
+##         -comment: "Panel 05 konta zapasowe (localStorage ghost-send:backups). backup-token-input/backup-add-btn/backup-list. W runCampaign przy 401/403 trySwitchBackup waliduje przez /discord/me i przelacza token zamiast stopu."
+##   - task: "Anti-detect maskowanie panel + runtime"
+##     implemented: true
+##     working: "NA"
+##     file: "frontend/src/App.js"
+##     needs_retesting: true
+##     priority: "medium"
+##     status_history:
+##         -working: "NA"
+##         -agent: "main"
+##         -comment: "Panel 06 maskowanie: mask-shuffle, mask-skip (+mask-skip-pct), mask-idle, mask-typos. Runtime: shuffle+stagger startu, losowe pominiecie, przerwy idle 5%, literowki+autokorekta przez edit."
+
+## agent_communication:
+##     -agent: "main"
+##     -message: "Iteracja 2. Backend: 6 nowych endpointow (/discord/channel-info, find-channel, messages, react, relationships, active-threads) - przetestuj ze zwracaja czysty JSON (fake token -> 401, zle ID -> 400, NIGDY 500). Frontend: NIE da sie przetestowac realnej wysylki/przelaczania (wymaga prawdziwych tokenow Discord) - testuj TYLKO render i interakcje UI: (1) kompaktowe karty kampanii + przycisk edytuj otwiera edit-campaign-modal; (2) w modalu toggle edit-adv-enabled pokazuje edit-advanced-body ze wszystkimi wierszami opcji; wszystkie inputy/toggle dzialaja i zapisuja sie do stanu; 'gotowe' (edit-done-btn) zamyka; (3) panel kont zapasowych: dodanie przez backup-token-input+backup-add-btn pojawia sie w backup-list, usuwanie dziala; (4) panel maskowania: toggle mask-shuffle/mask-skip/mask-idle/mask-typos, przy mask-skip pojawia sie mask-skip-pct. UWAGA: AI compose moze zwracac blad budzetu klucza - to nie bug kodu, pomin."

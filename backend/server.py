@@ -496,6 +496,200 @@ async def discord_me(data: EmojiFetchInput):
         return {"ok": False, "status": 0, "error": str(err)}
 
 
+# ---------------------------------------------------------------------------
+# Advanced campaign helpers (user-token features, all via Discord REST).
+# ---------------------------------------------------------------------------
+
+class ChannelInfoInput(BaseModel):
+    token: str
+    channelId: str
+    isBot: bool = True
+
+
+@api_router.post("/discord/channel-info")
+async def channel_info(data: ChannelInfoInput):
+    if not data.token or not re.fullmatch(r"\d{5,25}", data.channelId or ""):
+        return {"ok": False, "status": 400, "error": "Invalid input"}
+    headers = build_headers(data.token, data.isBot, data.channelId)
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as http:
+            r = await http.get(f"{DISCORD_API}/channels/{data.channelId}", headers=headers)
+            if r.status_code != 200:
+                return {"ok": False, "status": r.status_code, "error": r.text[:200]}
+            c = r.json()
+            return {
+                "ok": True,
+                "name": c.get("name"),
+                "guildId": c.get("guild_id"),
+                "type": c.get("type"),
+                "lastMessageId": c.get("last_message_id"),
+            }
+    except Exception as err:
+        return {"ok": False, "status": 0, "error": str(err)}
+
+
+class FindChannelInput(BaseModel):
+    token: str
+    guildId: str
+    name: str
+    isBot: bool = True
+
+
+@api_router.post("/discord/find-channel")
+async def find_channel(data: FindChannelInput):
+    # Finds the NEWEST channel with a given name in a guild (restore deleted/recreated).
+    if not data.token or not re.fullmatch(r"\d{5,25}", data.guildId or "") or not data.name.strip():
+        return {"ok": False, "status": 400, "error": "Invalid input"}
+    headers = build_headers(data.token, data.isBot)
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as http:
+            r = await http.get(f"{DISCORD_API}/guilds/{data.guildId}/channels", headers=headers)
+            if r.status_code != 200:
+                return {"ok": False, "status": r.status_code, "error": r.text[:200]}
+            name = data.name.strip().lower()
+            matches = [c for c in r.json() if (c.get("name") or "").lower() == name and c.get("type") in (0, 5, 15)]
+            if not matches:
+                return {"ok": True, "found": False}
+            # Snowflake id grows with time — the largest id is the newest channel.
+            newest = max(matches, key=lambda c: int(c["id"]))
+            return {"ok": True, "found": True, "channelId": newest["id"], "name": newest.get("name")}
+    except Exception as err:
+        return {"ok": False, "status": 0, "error": str(err)}
+
+
+class MessagesInput(BaseModel):
+    token: str
+    channelId: str
+    afterId: Optional[str] = None
+    limit: int = 20
+    isBot: bool = True
+
+
+@api_router.post("/discord/messages")
+async def channel_messages(data: MessagesInput):
+    if not data.token or not re.fullmatch(r"\d{5,25}", data.channelId or ""):
+        return {"ok": False, "status": 400, "error": "Invalid input"}
+    headers = build_headers(data.token, data.isBot, data.channelId)
+    try:
+        params = {"limit": max(1, min(50, data.limit))}
+        if data.afterId and re.fullmatch(r"\d{5,25}", data.afterId):
+            params["after"] = data.afterId
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as http:
+            r = await http.get(
+                f"{DISCORD_API}/channels/{data.channelId}/messages",
+                headers=headers,
+                params=params,
+            )
+            if r.status_code != 200:
+                return {"ok": False, "status": r.status_code, "error": r.text[:200]}
+            msgs = [
+                {
+                    "id": m["id"],
+                    "authorId": m.get("author", {}).get("id"),
+                    "author": m.get("author", {}).get("username", "?"),
+                    "bot": bool(m.get("author", {}).get("bot")),
+                    "content": (m.get("content") or "")[:500],
+                }
+                for m in r.json()
+            ]
+            msgs.reverse()
+            return {"ok": True, "messages": msgs, "count": len(msgs)}
+    except Exception as err:
+        return {"ok": False, "status": 0, "error": str(err)}
+
+
+class ReactInput(BaseModel):
+    token: str
+    channelId: str
+    messageId: str
+    emoji: str  # unicode char OR "name:id" for custom
+    isBot: bool = True
+
+
+@api_router.post("/discord/react")
+async def add_reaction(data: ReactInput):
+    if not data.token or not re.fullmatch(r"\d{5,25}", data.channelId or "") or not re.fullmatch(r"\d{5,25}", data.messageId or ""):
+        return {"ok": False, "status": 400, "error": "Invalid input"}
+    if not data.emoji.strip():
+        return {"ok": False, "status": 400, "error": "Missing emoji"}
+    import urllib.parse
+    emoji = urllib.parse.quote(data.emoji.strip(), safe="")
+    headers = build_headers(data.token, data.isBot, data.channelId)
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as http:
+            r = await http.put(
+                f"{DISCORD_API}/channels/{data.channelId}/messages/{data.messageId}/reactions/{emoji}/@me",
+                headers=headers,
+            )
+            if r.status_code not in (200, 204):
+                return {"ok": False, "status": r.status_code, "error": r.text[:200]}
+            return {"ok": True, "status": r.status_code}
+    except Exception as err:
+        return {"ok": False, "status": 0, "error": str(err)}
+
+
+class RelationshipsInput(BaseModel):
+    token: str
+    accept: bool = False
+
+
+@api_router.post("/discord/relationships")
+async def relationships(data: RelationshipsInput):
+    # User-token only: list pending incoming friend requests, optionally accept them.
+    if not data.token:
+        return {"ok": False, "status": 400, "error": "Missing token"}
+    headers = build_headers(data.token, False)
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as http:
+            r = await http.get(f"{DISCORD_API}/users/@me/relationships", headers=headers)
+            if r.status_code != 200:
+                return {"ok": False, "status": r.status_code, "error": r.text[:200]}
+            pending = [rel for rel in r.json() if rel.get("type") == 3]  # 3 = incoming request
+            accepted = []
+            if data.accept:
+                for rel in pending:
+                    uid = rel.get("id") or rel.get("user", {}).get("id")
+                    if not uid:
+                        continue
+                    pr = await http.put(f"{DISCORD_API}/users/@me/relationships/{uid}", headers=headers, json={})
+                    if pr.status_code in (200, 204):
+                        accepted.append(rel.get("user", {}).get("username") or uid)
+                    await asyncio.sleep(0.4)
+            return {"ok": True, "pending": len(pending), "accepted": accepted}
+    except Exception as err:
+        return {"ok": False, "status": 0, "error": str(err)}
+
+
+class ActiveThreadsInput(BaseModel):
+    token: str
+    guildId: str
+    parentId: str
+    isBot: bool = True
+
+
+@api_router.post("/discord/active-threads")
+async def active_threads(data: ActiveThreadsInput):
+    # Lists active threads under a forum/channel parent (for forum auto-reply).
+    if not data.token or not re.fullmatch(r"\d{5,25}", data.guildId or "") or not re.fullmatch(r"\d{5,25}", data.parentId or ""):
+        return {"ok": False, "status": 400, "error": "Invalid input"}
+    headers = build_headers(data.token, data.isBot)
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as http:
+            r = await http.get(f"{DISCORD_API}/guilds/{data.guildId}/threads/active", headers=headers)
+            if r.status_code != 200:
+                return {"ok": False, "status": r.status_code, "error": r.text[:200]}
+            data_j = r.json()
+            threads = [
+                {"id": t["id"], "name": t.get("name", ""), "parentId": t.get("parent_id"), "ownerId": t.get("owner_id")}
+                for t in data_j.get("threads", [])
+                if t.get("parent_id") == data.parentId
+            ]
+            return {"ok": True, "threads": threads}
+    except Exception as err:
+        return {"ok": False, "status": 0, "error": str(err)}
+
+
+
 class AiReplyInput(BaseModel):
     instruction: str = ""
     model: str = "gpt-5.4"

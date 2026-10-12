@@ -1,0 +1,876 @@
+import { useEffect, useRef, useState } from "react";
+import axios from "axios";
+import Lenis from "lenis";
+import { motion } from "framer-motion";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
+import { Button } from "@/components/ui/button";
+import { CampaignPreview } from "@/components/CampaignPreview";
+import { Layers, Eye, FolderOpen, Terminal, Trash2 } from "lucide-react";
+
+const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
+
+const newTarget = () => ({
+  id: Math.random().toString(36).slice(2, 9),
+  name: "kampania",
+  channelId: "",
+  message: "",
+  delaySec: 60,
+  loop: true,
+});
+
+function jitter(base, jitterPct) {
+  const delta = base * (jitterPct / 100);
+  return Math.max(0, Math.round(base + Math.random() * delta));
+}
+
+const STEALTH = {
+  low: {
+    label: "Szybki",
+    blurb: "Wysyła szybko, z minimalnym opóźnieniem. Wyższe ryzyko przy tokenach użytkownika.",
+    typing: false,
+    humanTyping: false,
+    jitterPct: 8,
+  },
+  balanced: {
+    label: "Zbalansowany",
+    blurb: "Wskaźnik pisania + do +12% dodatkowego opóźnienia. Dobre ustawienie domyślne.",
+    typing: true,
+    humanTyping: false,
+    jitterPct: 12,
+  },
+  max: {
+    label: "Max Stealth",
+    blurb: "Realistyczny czas pisania wg długości wiadomości + do +15% dodatkowego opóźnienia.",
+    typing: true,
+    humanTyping: true,
+    jitterPct: 15,
+  },
+};
+
+function humanTypingMs(text) {
+  const base = 400 + text.length * (180 + Math.random() * 120);
+  const variance = base * (0.15 + Math.random() * 0.25);
+  return Math.min(14000, Math.round(base + (Math.random() * 2 - 1) * variance));
+}
+
+const PROFILES_KEY = "ghost-send:profiles";
+const SESSION_KEY = "ghost-send:session";
+
+const TICKER = [
+  "kampanie równoległe",
+  "tryb stealth",
+  "podgląd na żywo",
+  "profile konfiguracji",
+  "dziennik sesji",
+  "custom emoji",
+  "bot + user token",
+  "jitter anty-wykrywanie",
+];
+
+export default function App() {
+  const [activeTab, setActiveTab] = useState("campaigns");
+  const [token, setToken] = useState("");
+  const [isBot, setIsBot] = useState(true);
+  const [targets, setTargets] = useState([newTarget()]);
+  const [stealth, setStealth] = useState("balanced");
+  const [emojiMap, setEmojiMap] = useState({});
+  const [emojisLoading, setEmojisLoading] = useState(false);
+  const [running, setRunning] = useState(false);
+  const stopRef = useRef(false);
+  const waitAbortersRef = useRef(new Set());
+  const [log, setLog] = useState([]);
+  const [stats, setStats] = useState({ sent: 0, failed: 0 });
+
+  const [profiles, setProfiles] = useState({});
+  const [profileName, setProfileName] = useState("");
+  const [selectedProfile, setSelectedProfile] = useState("");
+  const [includeToken, setIncludeToken] = useState(false);
+  const hydratedRef = useRef(false);
+
+  useEffect(() => {
+    const lenis = new Lenis({ lerp: 0.09, smoothWheel: true });
+    let raf;
+    const loop = (t) => {
+      lenis.raf(t);
+      raf = requestAnimationFrame(loop);
+    };
+    raf = requestAnimationFrame(loop);
+    return () => {
+      cancelAnimationFrame(raf);
+      lenis.destroy();
+    };
+  }, []);
+
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(PROFILES_KEY);
+      if (raw) setProfiles(JSON.parse(raw));
+      const last = localStorage.getItem(SESSION_KEY);
+      if (last) applyConfig(JSON.parse(last));
+    } catch {}
+    hydratedRef.current = true;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    if (!hydratedRef.current) return;
+    try {
+      const snap = { isBot, stealth, targets, savedToken: null };
+      localStorage.setItem(SESSION_KEY, JSON.stringify(snap));
+    } catch {}
+  }, [isBot, stealth, targets]);
+
+  const applyConfig = (c) => {
+    if (typeof c.isBot === "boolean") setIsBot(c.isBot);
+    if (c.stealth) setStealth(c.stealth);
+    if (Array.isArray(c.targets) && c.targets.length) {
+      setTargets(
+        c.targets.map((t) => ({
+          ...newTarget(),
+          ...t,
+          id: Math.random().toString(36).slice(2, 9),
+        }))
+      );
+    }
+    if (typeof c.savedToken === "string" && c.savedToken) setToken(c.savedToken);
+  };
+
+  const persistProfiles = (next) => {
+    setProfiles(next);
+    try {
+      localStorage.setItem(PROFILES_KEY, JSON.stringify(next));
+    } catch {}
+  };
+
+  const onSaveProfile = () => {
+    const name = profileName.trim();
+    if (!name) {
+      append("✗ podaj nazwę profilu");
+      return;
+    }
+    const cfg = {
+      isBot,
+      stealth,
+      targets,
+      savedToken: includeToken && token ? token : null,
+    };
+    persistProfiles({ ...profiles, [name]: cfg });
+    setSelectedProfile(name);
+    append(`✓ zapisano profil "${name}"${includeToken ? " (z tokenem)" : ""}`);
+  };
+
+  const onLoadProfile = () => {
+    const cfg = profiles[selectedProfile];
+    if (!cfg) {
+      append("✗ nie wybrano profilu");
+      return;
+    }
+    applyConfig(cfg);
+    append(`✓ wczytano profil "${selectedProfile}"`);
+  };
+
+  const onDeleteProfile = () => {
+    if (!selectedProfile || !profiles[selectedProfile]) return;
+    const next = { ...profiles };
+    delete next[selectedProfile];
+    persistProfiles(next);
+    append(`■ usunięto profil "${selectedProfile}"`);
+    setSelectedProfile("");
+  };
+
+  const onExportProfiles = () => {
+    const blob = new Blob([JSON.stringify(profiles, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `ghost-send-profiles-${Date.now()}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+    append(`⇡ wyeksportowano ${Object.keys(profiles).length} profil(i)`);
+  };
+
+  const onImportProfiles = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    file.text().then((txt) => {
+      try {
+        const parsed = JSON.parse(txt);
+        persistProfiles({ ...profiles, ...parsed });
+        append(`⇣ zaimportowano ${Object.keys(parsed).length} profil(i)`);
+      } catch {
+        append("✗ nieprawidłowy plik konfiguracji");
+      }
+    });
+    e.target.value = "";
+  };
+
+  const wait = async (ms) => {
+    await new Promise((resolve) => {
+      const t = setTimeout(() => {
+        waitAbortersRef.current.delete(abort);
+        resolve();
+      }, ms);
+      const abort = () => {
+        clearTimeout(t);
+        waitAbortersRef.current.delete(abort);
+        resolve();
+      };
+      waitAbortersRef.current.add(abort);
+    });
+  };
+
+  const abortAll = () => {
+    stopRef.current = true;
+    for (const a of Array.from(waitAbortersRef.current)) a();
+    append("■ ZATRZYMANO NA ŻĄDANIE");
+  };
+
+  const append = (line) =>
+    setLog((l) => [`[${new Date().toLocaleTimeString()}] ${line}`, ...l].slice(0, 200));
+
+  const updateTarget = (id, patch) =>
+    setTargets((ts) => ts.map((t) => (t.id === id ? { ...t, ...patch } : t)));
+  const addTarget = () => setTargets((ts) => [...ts, newTarget()]);
+  const removeTarget = (id) =>
+    setTargets((ts) => (ts.length > 1 ? ts.filter((t) => t.id !== id) : ts));
+
+  const onLoadEmojis = async () => {
+    if (!token.trim()) {
+      append("✗ WYMAGANY TOKEN aby pobrać emoji");
+      return;
+    }
+    setEmojisLoading(true);
+    append("⇣ skanowanie serwerów w poszukiwaniu emoji...");
+    try {
+      const res = (await axios.post(`${API}/discord/emojis`, { token, isBot })).data;
+      if (res.ok) {
+        setEmojiMap(res.map);
+        append(`✓ załadowano ${res.emojiCount} emoji z ${res.guildCount} serwera(ów)`);
+      } else {
+        append(`✗ skanowanie emoji → ${res.status}: ${String(res.error).slice(0, 80)}`);
+      }
+    } catch (err) {
+      append(`✗ ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setEmojisLoading(false);
+    }
+  };
+
+  const runCampaign = async (t) => {
+    const tag = t.name.trim() || `#${t.channelId.slice(-6)}`;
+    const preset = STEALTH[stealth];
+    do {
+      if (stopRef.current) break;
+      const tMs = preset.humanTyping ? humanTypingMs(t.message) : 1500;
+      if (preset.typing) append(`✎ [${tag}] pisanie (~${(tMs / 1000).toFixed(1)}s)`);
+      try {
+        const res = (
+          await axios.post(`${API}/discord/send`, {
+            token,
+            channelId: t.channelId,
+            message: t.message,
+            isBot,
+            typing: preset.typing,
+            typingMs: tMs,
+            emojiMap: Object.keys(emojiMap).length ? emojiMap : undefined,
+          })
+        ).data;
+        if (res.ok) {
+          setStats((s) => ({ ...s, sent: s.sent + 1 }));
+          append(`✓ [${tag}] wysłano`);
+        } else {
+          setStats((s) => ({ ...s, failed: s.failed + 1 }));
+          append(`✗ [${tag}] ${res.status}: ${String(res.error).slice(0, 80)}`);
+          if (res.status === 1015) {
+            const backoff = Math.max(300000, Math.round((res.retryAfter ?? 300) * 1000));
+            append(`⏸ [${tag}] cloudflare 1015 · przerwa ${(backoff / 1000).toFixed(0)}s (długi backoff)`);
+            await wait(backoff);
+          } else if (res.status === 429) {
+            const backoff = Math.max(30000, Math.round((res.retryAfter ?? 30) * 1000));
+            append(`⏸ [${tag}] limit żądań · przerwa ${(backoff / 1000).toFixed(0)}s`);
+            await wait(backoff);
+          } else if (res.status === 401 || res.status === 403) {
+            append(`■ [${tag}] token nieprawidłowy/zabroniony — zatrzymuję wszystko`);
+            stopRef.current = true;
+            for (const a of Array.from(waitAbortersRef.current)) a();
+            return;
+          }
+        }
+      } catch (err) {
+        setStats((s) => ({ ...s, failed: s.failed + 1 }));
+        append(`✗ [${tag}] ${err instanceof Error ? err.message : String(err)}`);
+      }
+      if (!t.loop || stopRef.current) break;
+      const baseMs = Math.max(1000, t.delaySec * 1000);
+      const w = jitter(baseMs, preset.jitterPct);
+      append(`⏱ [${tag}] następna za ${(w / 1000).toFixed(1)}s`);
+      await wait(w);
+    } while (t.loop && !stopRef.current);
+    append(`■ [${tag}] zatrzymano`);
+  };
+
+  const onSubmit = async (e) => {
+    e.preventDefault();
+    if (running) return;
+    if (!token.trim()) {
+      append("✗ WYMAGANY TOKEN");
+      setActiveTab("logs");
+      return;
+    }
+    const valid = targets.filter((t) => t.channelId.trim() && t.message.trim());
+    if (valid.length === 0) {
+      append("✗ DODAJ PRZYNAJMNIEJ JEDNĄ KAMPANIĘ");
+      setActiveTab("logs");
+      return;
+    }
+    setRunning(true);
+    stopRef.current = false;
+    setStats({ sent: 0, failed: 0 });
+    append(`▶ start ${valid.length} kampanii · tryb: ${STEALTH[stealth].label}`);
+    setActiveTab("logs");
+    try {
+      await Promise.all(valid.map((t) => runCampaign(t)));
+      append("■ wszystkie kampanie zatrzymane");
+    } finally {
+      setRunning(false);
+      stopRef.current = false;
+    }
+  };
+
+  return (
+    <div className="relative min-h-screen overflow-hidden" data-testid="ghost-send-app">
+      <div className="pointer-events-none absolute inset-0 grid-bg opacity-40" />
+      <div className="relative mx-auto max-w-6xl px-6 py-10">
+        <header className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+          <div>
+            <motion.div
+              initial={{ opacity: 0, y: 8 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.6 }}
+              className="flex items-center gap-2 font-mono text-xs uppercase tracking-[0.3em] text-primary"
+            >
+              <span className="inline-block h-2 w-2 rounded-full bg-primary animate-pulse-neon" />
+              sygnał//wychodzący
+            </motion.div>
+            <h1 className="mt-2 font-display text-5xl font-bold tracking-tight">
+              <span className="block overflow-hidden pb-1">
+                <motion.span
+                  initial={{ y: "110%" }}
+                  animate={{ y: "0%" }}
+                  transition={{ duration: 0.9, delay: 0.15, ease: [0.16, 1, 0.3, 1] }}
+                  className="block text-glow"
+                >
+                  GHOST<span className="text-primary">.</span>SEND
+                </motion.span>
+              </span>
+            </h1>
+            <motion.p
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              transition={{ delay: 0.5, duration: 0.8 }}
+              className="mt-2 max-w-lg font-mono text-xs text-muted-foreground"
+            >
+              kampanie discord · podgląd wiadomości · zapisane konfiguracje
+            </motion.p>
+          </div>
+          <motion.div
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ delay: 0.35, duration: 0.7 }}
+            className="flex items-center gap-3 font-mono text-xs"
+          >
+            <Stat label="wysłane" value={stats.sent} tone="neon" testId="stat-sent" />
+            <Stat label="błędy" value={stats.failed} tone="danger" testId="stat-failed" />
+            <StatusPill running={running} />
+          </motion.div>
+        </header>
+
+        <Ticker />
+
+        <Tabs value={activeTab} onValueChange={setActiveTab} className="mt-8">
+          <TabsList
+            aria-label="Widoki aplikacji"
+            className="grid h-auto w-full grid-cols-2 gap-1 rounded-md border border-border bg-secondary/40 p-1 sm:grid-cols-4"
+          >
+            <TabsTrigger value="campaigns" className="gap-2 py-3" data-testid="tab-campaigns">
+              <Layers className="size-4" />Kampanie
+            </TabsTrigger>
+            <TabsTrigger value="preview" className="gap-2 py-3" data-testid="tab-preview">
+              <Eye className="size-4" />Podgląd
+            </TabsTrigger>
+            <TabsTrigger value="configs" className="gap-2 py-3" data-testid="tab-configs">
+              <FolderOpen className="size-4" />Konfiguracje
+            </TabsTrigger>
+            <TabsTrigger value="logs" className="gap-2 py-3" data-testid="tab-logs">
+              <Terminal className="size-4" />Dziennik{" "}
+              {log.length > 0 && (
+                <span className="font-mono text-xs text-muted-foreground">({log.length})</span>
+              )}
+            </TabsTrigger>
+          </TabsList>
+          <form onSubmit={onSubmit} className="mt-6 space-y-6">
+            <TabsContent value="configs">
+              <Panel
+                label={`00 // konfiguracje [${Object.keys(profiles).length}]`}
+                action={
+                  <div className="flex items-center gap-2">
+                    <Button
+                      variant="outline"
+                      type="button"
+                      onClick={onExportProfiles}
+                      disabled={Object.keys(profiles).length === 0}
+                      data-testid="export-profiles-btn"
+                      className="rounded-sm border border-accent/40 bg-accent/10 px-3 py-1 font-mono text-[10px] uppercase tracking-wider text-accent transition-colors hover:bg-accent/20 disabled:opacity-40"
+                    >
+                      ⇡ eksport
+                    </Button>
+                    <label
+                      data-testid="import-profiles-label"
+                      className="cursor-pointer rounded-sm border border-accent/40 bg-accent/10 px-3 py-1 font-mono text-[10px] uppercase tracking-wider text-accent transition-colors hover:bg-accent/20"
+                    >
+                      ⇣ import
+                      <input
+                        type="file"
+                        accept="application/json"
+                        onChange={onImportProfiles}
+                        className="hidden"
+                        data-testid="import-profiles-input"
+                      />
+                    </label>
+                  </div>
+                }
+              >
+                <p className="mb-3 font-mono text-[10px] leading-relaxed text-muted-foreground">
+                  zapisz listy kampanii + ustawienia stealth jako nazwane profile. bieżąca sesja
+                  zapisuje się automatycznie lokalnie (bez tokena).
+                </p>
+                <div className="grid gap-2 sm:grid-cols-[1fr_auto_auto]">
+                  <input
+                    value={profileName}
+                    onChange={(e) => setProfileName(e.target.value)}
+                    placeholder="nazwa nowego profilu"
+                    data-testid="profile-name-input"
+                    className="rounded-sm border border-border bg-input px-2 py-1.5 font-mono text-xs text-foreground outline-none focus:border-primary"
+                  />
+                  <label className="flex items-center gap-2 rounded-sm border border-border bg-input px-3 py-1.5 font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
+                    <input
+                      type="checkbox"
+                      checked={includeToken}
+                      onChange={(e) => setIncludeToken(e.target.checked)}
+                      className="accent-primary"
+                      data-testid="include-token-checkbox"
+                    />
+                    z tokenem
+                  </label>
+                  <Button
+                    variant="outline"
+                    type="button"
+                    onClick={onSaveProfile}
+                    data-testid="save-profile-btn"
+                    className="rounded-sm border border-primary/40 bg-primary/10 px-3 py-1.5 font-mono text-[10px] uppercase tracking-wider text-primary transition-colors hover:bg-primary/20"
+                  >
+                    ▤ zapisz
+                  </Button>
+                </div>
+                {Object.keys(profiles).length > 0 && (
+                  <div className="mt-3 grid gap-2 sm:grid-cols-[1fr_auto_auto]">
+                    <select
+                      value={selectedProfile}
+                      onChange={(e) => setSelectedProfile(e.target.value)}
+                      data-testid="profile-select"
+                      className="rounded-sm border border-border bg-input px-2 py-1.5 font-mono text-xs text-foreground outline-none focus:border-primary"
+                    >
+                      <option value="">— wybierz profil —</option>
+                      {Object.keys(profiles).map((n) => (
+                        <option key={n} value={n}>
+                          {n}
+                          {profiles[n].savedToken ? " ⚿" : ""} · {profiles[n].targets.length} cel(ów)
+                        </option>
+                      ))}
+                    </select>
+                    <Button
+                      variant="outline"
+                      type="button"
+                      onClick={onLoadProfile}
+                      disabled={!selectedProfile}
+                      data-testid="load-profile-btn"
+                      className="rounded-sm border border-primary/40 bg-primary/10 px-3 py-1.5 font-mono text-[10px] uppercase tracking-wider text-primary transition-colors hover:bg-primary/20 disabled:opacity-40"
+                    >
+                      ↻ wczytaj
+                    </Button>
+                    <Button
+                      variant="outline"
+                      type="button"
+                      onClick={onDeleteProfile}
+                      disabled={!selectedProfile}
+                      data-testid="delete-profile-btn"
+                      className="rounded-sm border border-destructive/40 bg-destructive/10 px-3 py-1.5 font-mono text-[10px] uppercase tracking-wider text-destructive transition-colors hover:bg-destructive/20 disabled:opacity-40"
+                    >
+                      ✕ usuń
+                    </Button>
+                  </div>
+                )}
+                {includeToken && (
+                  <p className="mt-2 font-mono text-[10px] leading-relaxed text-warn">
+                    ⚠ token zostanie zapisany jako zwykły tekst w localStorage Twojej przeglądarki.
+                  </p>
+                )}
+              </Panel>
+            </TabsContent>
+            <TabsContent value="campaigns" className="space-y-6">
+              <Panel label="01 // autoryzacja">
+                <div className="flex gap-2">
+                  <TokenTypeButton
+                    active={isBot}
+                    onClick={() => setIsBot(true)}
+                    label="BOT"
+                    hint="zalecane"
+                    testId="token-bot-btn"
+                  />
+                  <TokenTypeButton
+                    active={!isBot}
+                    onClick={() => setIsBot(false)}
+                    label="USER"
+                    hint="ryzyko ToS"
+                    testId="token-user-btn"
+                  />
+                </div>
+                <label className="mt-4 block font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
+                  token
+                </label>
+                <input
+                  type="password"
+                  value={token}
+                  onChange={(e) => setToken(e.target.value)}
+                  data-testid="token-input"
+                  className="mt-1 w-full rounded-md border border-border bg-input px-3 py-2 font-mono text-sm text-foreground outline-none transition-colors focus:border-primary focus:shadow-[0_0_0_1px_hsl(var(--primary))]"
+                  placeholder="•••••••••••••••••••"
+                />
+              </Panel>
+
+              <Panel
+                label={`02 // kampanie [${targets.length}]`}
+                action={
+                  <div className="flex items-center gap-2">
+                    <Button
+                      variant="outline"
+                      type="button"
+                      onClick={onLoadEmojis}
+                      disabled={emojisLoading}
+                      data-testid="load-emoji-btn"
+                      title="Pobierz custom emoji ze wszystkich serwerów (Nitro potrzebne do użycia między serwerami przy tokenie użytkownika)"
+                      className="rounded-sm border border-accent/40 bg-accent/10 px-3 py-1 font-mono text-[10px] uppercase tracking-wider text-accent transition-colors hover:bg-accent/20 disabled:opacity-50"
+                    >
+                      {emojisLoading
+                        ? "⇣ skanowanie..."
+                        : Object.keys(emojiMap).length > 0
+                          ? `☺ ${Object.keys(emojiMap).length} emoji`
+                          : "⇣ wczytaj emoji"}
+                    </Button>
+                    <Button
+                      variant="outline"
+                      type="button"
+                      onClick={addTarget}
+                      data-testid="add-campaign-btn"
+                      className="rounded-sm border border-primary/40 bg-primary/10 px-3 py-1 font-mono text-[10px] uppercase tracking-wider text-primary transition-colors hover:bg-primary/20"
+                    >
+                      + dodaj kampanię
+                    </Button>
+                  </div>
+                }
+              >
+                <p className="mb-3 font-mono text-[10px] leading-relaxed text-muted-foreground">
+                  każda kampania działa niezależnie we własnej pętli z własnym opóźnieniem. użyj{" "}
+                  <span className="text-accent">:nazwa_emoji:</span> w wiadomości — custom emoji
+                  rozwiążą się automatycznie po wczytaniu.
+                </p>
+                <div className="space-y-3">
+                  {targets.map((t, i) => (
+                    <div
+                      key={t.id}
+                      data-testid={`campaign-card-${t.id}`}
+                      className="group relative rounded-md border border-border bg-background/40 p-3 transition-colors hover:border-primary/40"
+                    >
+                      <div className="mb-2 flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <span className="font-mono text-[10px] uppercase tracking-wider text-primary">
+                            #{String(i + 1).padStart(2, "0")}
+                          </span>
+                          <input
+                            value={t.name}
+                            onChange={(e) => updateTarget(t.id, { name: e.target.value })}
+                            data-testid={`campaign-name-input-${t.id}`}
+                            className="rounded-sm border border-transparent bg-transparent px-1 py-0.5 font-mono text-xs text-foreground outline-none hover:border-border focus:border-primary"
+                            placeholder="nazwa kampanii"
+                          />
+                        </div>
+                        <Button
+                          variant="outline"
+                          type="button"
+                          onClick={() => removeTarget(t.id)}
+                          disabled={targets.length === 1}
+                          data-testid={`campaign-remove-btn-${t.id}`}
+                          className="font-mono text-[10px] uppercase tracking-wider text-destructive opacity-0 transition-opacity hover:underline disabled:opacity-0 group-hover:opacity-100"
+                        >
+                          usuń
+                        </Button>
+                      </div>
+                      <label className="block font-mono text-[9px] uppercase tracking-wider text-muted-foreground">
+                        id kanału
+                      </label>
+                      <input
+                        value={t.channelId}
+                        onChange={(e) => updateTarget(t.id, { channelId: e.target.value })}
+                        data-testid={`campaign-channel-input-${t.id}`}
+                        className="mt-1 w-full rounded-sm border border-border bg-input px-2 py-1.5 font-mono text-xs text-foreground outline-none focus:border-primary"
+                        placeholder="np. 123456789012345678"
+                      />
+                      <label className="mt-2 block font-mono text-[9px] uppercase tracking-wider text-muted-foreground">
+                        wiadomość
+                      </label>
+                      <textarea
+                        value={t.message}
+                        onChange={(e) => updateTarget(t.id, { message: e.target.value })}
+                        rows={2}
+                        data-testid={`campaign-message-input-${t.id}`}
+                        className="mt-1 w-full resize-none rounded-sm border border-border bg-input px-2 py-1.5 font-mono text-xs text-foreground outline-none focus:border-primary"
+                        placeholder="co wysłać..."
+                      />
+                      <div className="mt-2 grid grid-cols-[1fr_auto] items-end gap-3">
+                        <div>
+                          <label className="block font-mono text-[9px] uppercase tracking-wider text-muted-foreground">
+                            opóźnienie przed kolejną wiadomością (sekundy)
+                          </label>
+                          <input
+                            type="number"
+                            min={1}
+                            value={t.delaySec}
+                            onChange={(e) =>
+                              updateTarget(t.id, { delaySec: Math.max(1, Number(e.target.value) || 1) })
+                            }
+                            data-testid={`campaign-delay-input-${t.id}`}
+                            className="mt-1 w-full rounded-sm border border-border bg-input px-2 py-1.5 font-mono text-xs text-foreground outline-none focus:border-primary"
+                          />
+                        </div>
+                        <label className="flex items-center gap-2 rounded-sm border border-border bg-input px-3 py-2 font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
+                          <input
+                            type="checkbox"
+                            checked={t.loop}
+                            onChange={(e) => updateTarget(t.id, { loop: e.target.checked })}
+                            className="accent-primary"
+                            data-testid={`campaign-loop-toggle-${t.id}`}
+                          />
+                          pętla
+                        </label>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </Panel>
+
+              <Panel label="03 // poziom stealth">
+                <p className="mb-3 font-mono text-[10px] leading-relaxed text-muted-foreground">
+                  kontroluje, jak ludzko wygląda każda wysyłka. dotyczy wszystkich kampanii.
+                </p>
+                <div className="grid gap-2 sm:grid-cols-3">
+                  {Object.keys(STEALTH).map((k) => {
+                    const p = STEALTH[k];
+                    const active = stealth === k;
+                    return (
+                      <Button
+                        variant="outline"
+                        key={k}
+                        type="button"
+                        onClick={() => setStealth(k)}
+                        data-testid={`stealth-option-${k}`}
+                        className={`h-auto flex-col items-start gap-0 rounded-md border p-3 text-left transition-all ${
+                          active
+                            ? "border-primary bg-primary/10 shadow-[0_0_20px_-8px_hsl(var(--primary))]"
+                            : "border-border bg-input/50 hover:border-primary/40"
+                        }`}
+                      >
+                        <div className={`font-mono text-sm font-bold ${active ? "text-primary" : "text-foreground"}`}>
+                          {p.label}
+                        </div>
+                        <div className="mt-1 whitespace-normal font-mono text-[10px] leading-snug text-muted-foreground">
+                          {p.blurb}
+                        </div>
+                      </Button>
+                    );
+                  })}
+                </div>
+                <p className="mt-3 font-mono text-[10px] leading-relaxed text-muted-foreground">
+                  każda kampania zapętla się z własnym opóźnieniem, dopóki nie naciśniesz{" "}
+                  <span className="text-destructive">stop</span>. nie zamykaj karty — zamknięcie
+                  zatrzymuje wszystko.
+                </p>
+              </Panel>
+            </TabsContent>
+            <TabsContent value="preview">
+              <CampaignPreview targets={targets} />
+            </TabsContent>
+            <TabsContent value="logs">
+              <div className="mb-3 flex items-center justify-between">
+                <h2 className="text-lg font-semibold">Dziennik sesji</h2>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setLog([])}
+                  disabled={!log.length}
+                  data-testid="clear-log-btn"
+                >
+                  <Trash2 />Wyczyść
+                </Button>
+              </div>
+              <div className="scanlines overflow-hidden rounded-md border border-border bg-background/80">
+                <ul
+                  aria-live="polite"
+                  data-testid="log-list"
+                  className="log-scroll h-[420px] overflow-auto p-4 font-mono text-xs leading-relaxed"
+                >
+                  {log.length === 0 && <li className="text-muted-foreground">Brak zdarzeń w tej sesji.</li>}
+                  {log.map((line, index) => (
+                    <li key={index} className={`${logColor(line)} break-words [overflow-wrap:anywhere]`}>
+                      {line}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            </TabsContent>
+            <div className="flex gap-2 border-t border-border pt-5">
+              <Button
+                variant="outline"
+                type="submit"
+                disabled={running}
+                data-testid="start-campaigns-btn"
+                className="group relative flex-1 overflow-hidden rounded-md border border-primary bg-primary/10 px-6 py-3 font-mono text-sm font-bold uppercase tracking-[0.2em] text-primary transition-all hover:bg-primary hover:text-primary-foreground disabled:opacity-50"
+              >
+                <span className="relative z-10">{running ? "▮▮ działa..." : "▶ start kampanii"}</span>
+                {!running && (
+                  <div className="absolute inset-0 -translate-x-full bg-gradient-to-r from-transparent via-primary/40 to-transparent transition-transform duration-1000 group-hover:translate-x-full" />
+                )}
+              </Button>
+              {running && (
+                <Button
+                  variant="outline"
+                  type="button"
+                  onClick={abortAll}
+                  data-testid="abort-btn"
+                  className="rounded-md border border-destructive bg-destructive/10 px-4 py-3 font-mono text-sm font-bold uppercase tracking-wider text-destructive hover:bg-destructive hover:text-destructive-foreground"
+                >
+                  ■ stop
+                </Button>
+              )}
+            </div>
+          </form>
+
+          <p className="mt-4 font-mono text-[10px] leading-relaxed text-warn">
+            Tokeny użytkowników naruszają regulamin Discorda. Korzystaj z oficjalnego bota; żaden
+            tryb nie gwarantuje uniknięcia blokady.
+          </p>
+        </Tabs>
+      </div>
+    </div>
+  );
+}
+
+function logColor(line) {
+  if (line.includes("✓")) return "text-primary";
+  if (line.includes("✗") || line.includes("ZATRZYMANO")) return "text-destructive";
+  if (line.includes("⏸") || line.includes("⏱")) return "text-warn";
+  if (line.includes("✎") || line.includes("↷")) return "text-accent";
+  if (line.includes("──") || line.includes("▶") || line.includes("■")) return "text-primary/80";
+  return "text-muted-foreground";
+}
+
+function Panel({ label, action, children }) {
+  return (
+    <motion.section
+      initial={{ opacity: 0, y: 24 }}
+      whileInView={{ opacity: 1, y: 0 }}
+      viewport={{ once: true, margin: "-60px" }}
+      transition={{ duration: 0.6, ease: [0.16, 1, 0.3, 1] }}
+      className="panel-shadow rounded-md border border-border bg-card/60 p-5 backdrop-blur-sm"
+    >
+      <div className="mb-4 flex items-center justify-between">
+        <h2 className="font-mono text-[11px] uppercase tracking-[0.25em] text-primary">{label}</h2>
+        {action}
+      </div>
+      {children}
+    </motion.section>
+  );
+}
+
+function TokenTypeButton({ active, onClick, label, hint, testId }) {
+  return (
+    <Button
+      variant="outline"
+      type="button"
+      onClick={onClick}
+      data-testid={testId}
+      className={`h-auto flex-1 flex-col items-start gap-0 rounded-md border px-4 py-3 text-left transition-all ${
+        active
+          ? "border-primary bg-primary/10 shadow-[0_0_20px_-8px_hsl(var(--primary))]"
+          : "border-border bg-input/50 hover:border-primary/40"
+      }`}
+    >
+      <div className={`font-mono text-sm font-bold ${active ? "text-primary" : "text-foreground"}`}>{label}</div>
+      <div className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">{hint}</div>
+    </Button>
+  );
+}
+
+function Stat({ label, value, tone, testId }) {
+  return (
+    <div
+      data-testid={testId}
+      className={`rounded-sm border px-3 py-2 text-right ${
+        tone === "neon" ? "border-primary/30 bg-primary/5" : "border-destructive/30 bg-destructive/5"
+      }`}
+    >
+      <div
+        className={`font-mono text-lg font-bold leading-none ${
+          tone === "neon" ? "text-primary" : "text-destructive"
+        }`}
+      >
+        {String(value).padStart(3, "0")}
+      </div>
+      <div className="mt-0.5 font-mono text-[9px] uppercase tracking-wider text-muted-foreground">{label}</div>
+    </div>
+  );
+}
+
+function StatusPill({ running }) {
+  const s = running
+    ? { label: "DZIAŁA", color: "text-primary border-primary/40 bg-primary/10" }
+    : { label: "GOTOWY", color: "text-muted-foreground border-border" };
+  return (
+    <div
+      data-testid="status-pill"
+      className={`rounded-sm border px-3 py-2 font-mono text-[10px] uppercase tracking-wider ${s.color}`}
+    >
+      <span className="mr-1.5 inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-current" />
+      {s.label}
+    </div>
+  );
+}
+
+function Ticker() {
+  const items = [...TICKER, ...TICKER, ...TICKER];
+  return (
+    <div
+      data-testid="status-marquee"
+      className="relative mt-8 overflow-hidden border-y border-border/60 py-2 [mask-image:linear-gradient(90deg,transparent,black_10%,black_90%,transparent)]"
+    >
+      <div className="animate-marquee flex w-max gap-8 whitespace-nowrap font-mono text-[10px] uppercase tracking-[0.3em] text-muted-foreground/70">
+        {items.map((t, i) => (
+          <span key={i} className="flex items-center gap-8">
+            <span>{t}</span>
+            <span className="text-primary/60">//</span>
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}

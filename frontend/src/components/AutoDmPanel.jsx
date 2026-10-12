@@ -2,8 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import axios from "axios";
 import { motion } from "framer-motion";
 import { Button } from "@/components/ui/button";
-import { resolveSpintax, resolveVars, fmtDur } from "@/lib/ghost";
-import { MessageSquareReply, Bot, Sparkles, Square, Play } from "lucide-react";
+import { matchRule, resolveSpintax, resolveVars } from "@/lib/ghost";
+import { MessageSquareReply, Bot, Sparkles, Square, Play, Zap, Plus, X } from "lucide-react";
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 const AUTODM_KEY = "ghost-send:autodm";
@@ -15,13 +15,23 @@ const AI_MODELS = [
   ["gpt-5-nano", "gpt-5-nano · najtańszy"],
 ];
 
+const DEFAULTS = {
+  interval: 20,
+  mode: "rules",
+  fixedMessage: "",
+  instruction: "",
+  model: "gpt-5.4",
+  rules: [{ keywords: "", reply: "" }],
+  fallback: "",
+};
+
 export function AutoDmPanel({ token, isBot, onLog, onAlert, onRecord }) {
   const [cfg, setCfg] = useState(() => {
     try {
       const raw = localStorage.getItem(AUTODM_KEY);
-      if (raw) return { interval: 20, mode: "fixed", fixedMessage: "", instruction: "", model: "gpt-5.4", ...JSON.parse(raw) };
+      if (raw) return { ...DEFAULTS, ...JSON.parse(raw) };
     } catch {}
-    return { interval: 20, mode: "fixed", fixedMessage: "", instruction: "", model: "gpt-5.4" };
+    return DEFAULTS;
   });
   const [running, setRunning] = useState(false);
   const [replies, setReplies] = useState(0);
@@ -56,6 +66,25 @@ export function AutoDmPanel({ token, isBot, onLog, onAlert, onRecord }) {
   const stopAll = () => {
     stopRef.current = true;
     for (const a of Array.from(abortersRef.current)) a();
+  };
+
+  const buildReply = (incoming, who, history) => {
+    const c = cfgRef.current;
+    if (c.mode === "rules") {
+      const text = incoming.map((m) => m.content).join(" ");
+      const rule = matchRule(c.rules, text);
+      if (rule) {
+        onLog(`⚡ [auto-dm] reguła "${rule.keywords.split(",")[0].trim()}" dla ${who}`);
+        return resolveVars(resolveSpintax(rule.reply), replies + 1);
+      }
+      if (c.fallback.trim()) return resolveVars(resolveSpintax(c.fallback), replies + 1);
+      onLog(`· [auto-dm] brak reguły dla ${who} — pomijam`);
+      return "";
+    }
+    if (c.mode === "fixed") {
+      return resolveVars(resolveSpintax(c.fixedMessage), replies + 1);
+    }
+    return null; // AI — handled async by caller
   };
 
   const pollOnce = async () => {
@@ -94,11 +123,9 @@ export function AutoDmPanel({ token, isBot, onLog, onAlert, onRecord }) {
       const who = ch.name || ch.id;
       onLog(`✉ [auto-dm] ${who}: ${incoming.length} nowa(e) wiadomość(i)`);
 
-      let reply = "";
-      const c = cfgRef.current;
-      if (c.mode === "fixed") {
-        reply = resolveVars(resolveSpintax(c.fixedMessage), replies + 1);
-      } else {
+      let reply = buildReply(incoming, who);
+      if (reply === null) {
+        const c = cfgRef.current;
         const history = mr.messages.slice(-8).map((m) => ({
           role: m.authorId === res.me.id ? "assistant" : "user",
           content: m.content,
@@ -117,7 +144,7 @@ export function AutoDmPanel({ token, isBot, onLog, onAlert, onRecord }) {
         }
         reply = ai.reply;
       }
-      if (!reply.trim()) continue;
+      if (!reply || !reply.trim()) continue;
 
       await wait(1500 + Math.random() * 3500);
       if (stopRef.current) return;
@@ -170,7 +197,15 @@ export function AutoDmPanel({ token, isBot, onLog, onAlert, onRecord }) {
       return;
     }
     if (cfg.mode === "fixed" && !cfg.fixedMessage.trim()) {
-      onLog("✗ [auto-dm] ustal treść auto-odpowiedzi albo przełącz na AI");
+      onLog("✗ [auto-dm] ustal treść auto-odpowiedzi albo zmień tryb");
+      return;
+    }
+    if (
+      cfg.mode === "rules" &&
+      !cfg.rules.some((r) => r.keywords.trim() && r.reply.trim()) &&
+      !cfg.fallback.trim()
+    ) {
+      onLog("✗ [auto-dm] dodaj regułę (słowa-klucze + odpowiedź) albo odpowiedź domyślną");
       return;
     }
     stopRef.current = false;
@@ -178,9 +213,17 @@ export function AutoDmPanel({ token, isBot, onLog, onAlert, onRecord }) {
     seenRef.current = {};
     setReplies(0);
     setRunning(true);
-    onLog(`▶ [auto-dm] start nasłuchu · co ${Math.max(10, cfg.interval)}s · tryb: ${cfg.mode === "fixed" ? "ustalona wiadomość" : `AI (${cfg.model})`}`);
+    const modeLabel =
+      cfg.mode === "rules" ? "reguły · 0 kredytów" : cfg.mode === "fixed" ? "ustalona wiadomość" : `AI (${cfg.model})`;
+    onLog(`▶ [auto-dm] start nasłuchu · co ${Math.max(10, cfg.interval)}s · tryb: ${modeLabel}`);
     loop();
   };
+
+  const setRule = (i, patch) =>
+    setCfg({ ...cfg, rules: cfg.rules.map((r, j) => (j === i ? { ...r, ...patch } : r)) });
+  const addRule = () => setCfg({ ...cfg, rules: [...cfg.rules, { keywords: "", reply: "" }] });
+  const removeRule = (i) =>
+    setCfg({ ...cfg, rules: cfg.rules.length > 1 ? cfg.rules.filter((_, j) => j !== i) : cfg.rules });
 
   return (
     <motion.section
@@ -237,16 +280,30 @@ export function AutoDmPanel({ token, isBot, onLog, onAlert, onRecord }) {
             <Button
               variant="outline"
               type="button"
+              onClick={() => setCfg({ ...cfg, mode: "rules" })}
+              disabled={running}
+              data-testid="autodm-mode-rules"
+              className={`flex-1 rounded-sm border px-2 py-2 font-mono text-[10px] uppercase tracking-wider transition-colors ${
+                cfg.mode === "rules"
+                  ? "border-primary/50 bg-primary/10 text-primary"
+                  : "border-border bg-input text-muted-foreground hover:border-primary/30"
+              }`}
+            >
+              <Zap className="size-3.5" /> reguły · darmowe
+            </Button>
+            <Button
+              variant="outline"
+              type="button"
               onClick={() => setCfg({ ...cfg, mode: "fixed" })}
               disabled={running}
               data-testid="autodm-mode-fixed"
-              className={`flex-1 rounded-sm border px-3 py-2 font-mono text-[10px] uppercase tracking-wider transition-colors ${
+              className={`flex-1 rounded-sm border px-2 py-2 font-mono text-[10px] uppercase tracking-wider transition-colors ${
                 cfg.mode === "fixed"
                   ? "border-primary/50 bg-primary/10 text-primary"
                   : "border-border bg-input text-muted-foreground hover:border-primary/30"
               }`}
             >
-              <Bot className="size-3.5" /> ustalona wiadomość
+              <Bot className="size-3.5" /> ustalona
             </Button>
             <Button
               variant="outline"
@@ -254,7 +311,7 @@ export function AutoDmPanel({ token, isBot, onLog, onAlert, onRecord }) {
               onClick={() => setCfg({ ...cfg, mode: "ai" })}
               disabled={running}
               data-testid="autodm-mode-ai"
-              className={`flex-1 rounded-sm border px-3 py-2 font-mono text-[10px] uppercase tracking-wider transition-colors ${
+              className={`flex-1 rounded-sm border px-2 py-2 font-mono text-[10px] uppercase tracking-wider transition-colors ${
                 cfg.mode === "ai"
                   ? "border-accent/50 bg-accent/10 text-accent"
                   : "border-border bg-input text-muted-foreground hover:border-accent/30"
@@ -266,7 +323,74 @@ export function AutoDmPanel({ token, isBot, onLog, onAlert, onRecord }) {
         </div>
       </div>
 
-      {cfg.mode === "fixed" ? (
+      {cfg.mode === "rules" && (
+        <div className="mt-3" data-testid="autodm-rules-editor">
+          <div className="mb-1 flex items-center justify-between">
+            <label className="font-mono text-[9px] uppercase tracking-wider text-muted-foreground">
+              reguły: słowa-klucze (po przecinku) → odpowiedź
+            </label>
+            <Button
+              variant="outline"
+              type="button"
+              onClick={addRule}
+              disabled={running}
+              data-testid="autodm-add-rule-btn"
+              className="rounded-sm border border-primary/40 bg-primary/10 px-2 py-1 font-mono text-[10px] uppercase tracking-wider text-primary hover:bg-primary/20"
+            >
+              <Plus className="size-3" /> reguła
+            </Button>
+          </div>
+          <div className="space-y-2">
+            {cfg.rules.map((r, i) => (
+              <div key={i} className="grid gap-2 sm:grid-cols-[1fr_1fr_auto]">
+                <input
+                  value={r.keywords}
+                  onChange={(e) => setRule(i, { keywords: e.target.value })}
+                  disabled={running}
+                  data-testid={`autodm-rule-keywords-${i}`}
+                  className="rounded-sm border border-border bg-input px-2 py-1.5 font-mono text-xs text-foreground outline-none focus:border-primary disabled:opacity-50"
+                  placeholder="np. trening, kiedy, godzina"
+                />
+                <input
+                  value={r.reply}
+                  onChange={(e) => setRule(i, { reply: e.target.value })}
+                  disabled={running}
+                  data-testid={`autodm-rule-reply-${i}`}
+                  className="rounded-sm border border-border bg-input px-2 py-1.5 font-mono text-xs text-foreground outline-none focus:border-primary disabled:opacity-50"
+                  placeholder="np. Trening w piątek o 18:00!"
+                />
+                <Button
+                  variant="outline"
+                  type="button"
+                  onClick={() => removeRule(i)}
+                  disabled={running || cfg.rules.length === 1}
+                  data-testid={`autodm-rule-remove-${i}`}
+                  className="rounded-sm border border-destructive/40 bg-destructive/10 px-2 py-1.5 font-mono text-[10px] text-destructive hover:bg-destructive/20 disabled:opacity-40"
+                >
+                  <X className="size-3" />
+                </Button>
+              </div>
+            ))}
+          </div>
+          <label className="mt-3 block font-mono text-[9px] uppercase tracking-wider text-muted-foreground">
+            odpowiedź domyślna (gdy żadna reguła nie pasuje; puste = nie odpowiadaj)
+          </label>
+          <input
+            value={cfg.fallback}
+            onChange={(e) => setCfg({ ...cfg, fallback: e.target.value })}
+            disabled={running}
+            data-testid="autodm-fallback-input"
+            className="mt-1 w-full rounded-sm border border-border bg-input px-2 py-1.5 font-mono text-xs text-foreground outline-none focus:border-primary disabled:opacity-50"
+            placeholder="np. Napisz konkretniej, odezwę się wieczorem."
+          />
+          <p className="mt-2 font-mono text-[10px] leading-relaxed text-primary/80">
+            ⚡ reguły działają lokalnie — nielimitowane, zero kredytów AI, zero opóźnienia. w
+            odpowiedziach działają {"{a|b}"} i zmienne.
+          </p>
+        </div>
+      )}
+
+      {cfg.mode === "fixed" && (
         <div className="mt-3">
           <label className="block font-mono text-[9px] uppercase tracking-wider text-muted-foreground">
             treść auto-odpowiedzi <span className="text-accent">· działa {"{a|b}"} i zmienne</span>
@@ -281,7 +405,9 @@ export function AutoDmPanel({ token, isBot, onLog, onAlert, onRecord }) {
             placeholder="np. {Cześć|Hej}! Jestem zajęty, odezwę się później."
           />
         </div>
-      ) : (
+      )}
+
+      {cfg.mode === "ai" && (
         <div className="mt-3 grid gap-3 sm:grid-cols-[1fr_auto]">
           <div>
             <label className="block font-mono text-[9px] uppercase tracking-wider text-muted-foreground">
@@ -343,8 +469,9 @@ export function AutoDmPanel({ token, isBot, onLog, onAlert, onRecord }) {
       </div>
       <p className="mt-3 font-mono text-[10px] leading-relaxed text-muted-foreground">
         <MessageSquareReply className="mr-1 inline size-3.5 text-accent" />
-        odpowiedzi AI generowane przez klucz uniwersalny Emergent (obciąża saldo klucza). każda
-        wysłana auto-odpowiedź trafia do historii jako kampania „auto-dm".
+        tryb AI używa klucza uniwersalnego Emergent (obciąża saldo klucza) — do prostych pytań
+        wystarczy tryb reguł, który jest darmowy. każda auto-odpowiedź trafia do historii jako
+        „auto-dm".
       </p>
     </motion.section>
   );

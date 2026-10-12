@@ -86,6 +86,20 @@ export function fmtDur(ms) {
   return `${Math.floor(h / 24)}d ${h % 24}h`;
 }
 
+// Dopasowanie reguły auto-odpowiedzi: pierwsza reguła, której dowolne
+// słowo-klucz (po przecinku) występuje w treści wiadomości.
+export function matchRule(rules, text) {
+  const t = (text || "").toLowerCase();
+  for (const r of rules || []) {
+    const kws = (r.keywords || "")
+      .split(",")
+      .map((k) => k.trim().toLowerCase())
+      .filter(Boolean);
+    if (kws.length && kws.some((k) => t.includes(k))) return r;
+  }
+  return null;
+}
+
 // Dwu-tonowy alarm WebAudio — bez zewnętrznych plików dźwiękowych.
 export function playAlertSound() {
   try {

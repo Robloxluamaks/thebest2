@@ -1,0 +1,39 @@
+{
+  "summary": "Backend: 9/12 pytest passed. All Discord proxy endpoints (send/edit/delete) correctly return clean JSON with no HTTP 500 — fake token path returns {ok:false,status:401}, invalid IDs return 400. /api/history/heatmap returns 7x24 grid with peak/total. The 3 failing tests are AI compose (generate/improve/spintax) — ALL fail with the SAME upstream error: 'litellm.RateLimitError: Budget has been exceeded! Max budget: 0.001'. The code logic is correct (empty-input validation returns ok:false correctly); the EMERGENT_LLM_KEY has hit its budget cap. Frontend: welcome -> panel, AI modal opens and submits, error is rendered gracefully in the modal (no crash). Templates save, appear in template-list and in campaign-template-select dropdown. Statystyki tab renders heatmap-panel and empty-state text. Advanced toggle (checkbox) is present but after clicking, data-testids campaign-adv-autoedit-toggle / campaign-adv-autodelete-toggle were NOT found in the DOM — the advanced body may not be rendering, or those testids are missing/named differently. alert-logs-toggle was NOT found on Statystyki tab (there is a 'Dziennik (1)' tab visible — alerts panel may live there, not under Statystyki).",
+  "backend_issues": {
+    "critical": [
+      {"endpoint": "/api/ai/compose", "issue": "LLM budget exceeded on EMERGENT_LLM_KEY (Max budget: 0.001 USD). All three modes (generate/improve/spintax) return ok:false with litellm.RateLimitError. Code path is correct; this is an infra/key quota issue — budget must be raised or key rotated.", "priority": "CRITICAL"}
+    ],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "Campaign advanced panel", "issue": "After clicking campaign-advanced-toggle-{id}, the expected children data-testid=campaign-adv-autoedit-toggle and campaign-adv-autodelete-toggle are not found in the DOM. Either the advanced body is not expanding, or these testids are not applied/renamed.", "selector": "[data-testid='campaign-adv-autoedit-toggle']", "priority": "HIGH"},
+      {"component": "Statystyki/Alerts", "issue": "data-testid='alert-logs-toggle' not found on Statystyki tab. The alerts/logs panel appears to be under the separate 'Dziennik' tab. Either move it or update the test spec/testid placement.", "selector": "[data-testid='alert-logs-toggle']", "priority": "MEDIUM"}
+    ],
+    "integration_issues": [
+      {"flow": "AI compose -> apply to campaign message", "issue": "Cannot be verified end-to-end because EMERGENT_LLM_KEY budget is exceeded. Modal correctly surfaces the backend error. UI will work once budget is restored.", "affected_selectors": ["[data-testid='ai-result-text']", "[data-testid='ai-apply-replace']"]}
+    ],
+    "design_issues": []
+  },
+  "test_report_links": ["/app/backend/tests/backend_test.py", "/app/test_reports/pytest/pytest_results.xml"],
+  "action_items": [
+    "Increase/rotate EMERGENT_LLM_KEY budget — currently capped at $0.001, which is why every /api/ai/compose generation fails (even single short calls exceed it).",
+    "Verify campaign-adv-autoedit-toggle and campaign-adv-autodelete-toggle data-testids are rendered when the advanced panel is expanded; current click on campaign-advanced-toggle-{id} did not reveal them.",
+    "Clarify / fix location of alert-logs-toggle (expected on Statystyki per spec, actually likely in Dziennik tab)."
+  ],
+  "critical_code_review_comments": [
+    "server.py is 753 lines — consider splitting into routers (discord/, ai/, history/) for maintainability (>700-line rule).",
+    "Good: Discord proxy endpoints wrap all httpx calls in try/except and never leak 500s; ObjectId is excluded via projection {'_id':0}; env vars used throughout; Pydantic validation on all POST bodies; input validation (regex channel/message IDs, length caps) is thorough.",
+    "AI compose: empty-input validation runs AFTER system/user_text construction — minor; still returns ok:false correctly.",
+    "/api/discord/send: 'id' key is only present when ok:true (success path). On fake-token the response has no 'id' which matches the spec's 'can't trigger real success' note."
+  ],
+  "updated_files": ["/app/backend/tests/backend_test.py"],
+  "success_rate": {"backend": "75% (9/12 — 3 AI tests blocked by LLM budget)", "frontend": "80% (templates, heatmap, modal open/submit/error-render work; advanced-toggle children + alert-logs-toggle not found)"},
+  "test_credentials": "No login required. Used FAKE.TOKEN.xyz for Discord endpoints — 401 is expected.",
+  "seed_data_creation": "Saved one template 'TEST_tpl' via UI (persisted in localStorage). No DB seed.",
+  "retest_needed": true,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Backend Discord proxy + heatmap are solid. AI endpoints will remain red until the EMERGENT_LLM_KEY budget is bumped — nothing else to do on code side there. Re-run /app/backend/tests/backend_test.py after budget fix. Frontend specifics to re-verify: (1) click campaign-advanced-toggle-{id} and confirm campaign-adv-autoedit-toggle / campaign-adv-autodelete-toggle become visible; (2) confirm whether alert-logs-toggle lives in Statystyki or Dziennik tab and adjust spec/testid accordingly.",
+  "rca of the issue": "AI compose failures RCA: Upstream LiteLLM returns RateLimitError with message 'Budget has been exceeded! Max budget: 0.001' for EMERGENT_LLM_KEY db6kdm2o5dgs73e04eog. Even a single short gpt-5.4 call costs ~0.00157 which exceeds the 0.001 cap. Mitigation: raise key budget via Emergent dashboard or rotate to a key with higher cap. No code change needed."
+}

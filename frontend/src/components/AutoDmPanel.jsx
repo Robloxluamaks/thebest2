@@ -8,11 +8,18 @@ import { MessageSquareReply, Bot, Sparkles, Square, Play, Zap, Plus, X } from "l
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 const AUTODM_KEY = "ghost-send:autodm";
 
-const AI_MODELS = [
+const AI_MODELS_OPENAI = [
   ["gpt-5.4", "gpt-5.4 · domyślny"],
   ["gpt-5.4-mini", "gpt-5.4-mini · szybszy"],
   ["gpt-5-mini", "gpt-5-mini · oszczędny"],
   ["gpt-5-nano", "gpt-5-nano · najtańszy"],
+];
+
+const AI_MODELS_GEMINI = [
+  ["gemini-2.5-flash-lite", "gemini-2.5-flash-lite · darmowy tier"],
+  ["gemini-2.5-flash", "gemini-2.5-flash"],
+  ["gemini-3-flash-preview", "gemini-3-flash-preview"],
+  ["gemini-3.5-flash", "gemini-3.5-flash"],
 ];
 
 const DEFAULTS = {
@@ -20,7 +27,9 @@ const DEFAULTS = {
   mode: "rules",
   fixedMessage: "",
   instruction: "",
-  model: "gpt-5.4",
+  model: "gemini-2.5-flash-lite",
+  provider: "gemini",
+  geminiKey: "",
   rules: [{ keywords: "", reply: "" }],
   fallback: "",
 };
@@ -134,6 +143,8 @@ export function AutoDmPanel({ token, isBot, onLog, onAlert, onRecord }) {
           await axios.post(`${API}/ai/reply`, {
             instruction: c.instruction,
             model: c.model,
+            provider: c.provider,
+            geminiKey: c.provider === "gemini" ? c.geminiKey : undefined,
             history,
             channelKey: ch.id,
           })
@@ -208,13 +219,21 @@ export function AutoDmPanel({ token, isBot, onLog, onAlert, onRecord }) {
       onLog("✗ [auto-dm] dodaj regułę (słowa-klucze + odpowiedź) albo odpowiedź domyślną");
       return;
     }
+    if (cfg.mode === "ai" && cfg.provider === "gemini" && !cfg.geminiKey.trim()) {
+      onLog("✗ [auto-dm] wklej własny klucz Gemini albo przełącz na klucz uniwersalny");
+      return;
+    }
     stopRef.current = false;
     baselineRef.current = false;
     seenRef.current = {};
     setReplies(0);
     setRunning(true);
     const modeLabel =
-      cfg.mode === "rules" ? "reguły · 0 kredytów" : cfg.mode === "fixed" ? "ustalona wiadomość" : `AI (${cfg.model})`;
+      cfg.mode === "rules"
+        ? "reguły · 0 kredytów"
+        : cfg.mode === "fixed"
+          ? "ustalona wiadomość"
+          : `AI (${cfg.model}${cfg.provider === "gemini" ? ", własny klucz" : ", klucz uniwersalny"})`;
     onLog(`▶ [auto-dm] start nasłuchu · co ${Math.max(10, cfg.interval)}s · tryb: ${modeLabel}`);
     loop();
   };
@@ -408,38 +427,95 @@ export function AutoDmPanel({ token, isBot, onLog, onAlert, onRecord }) {
       )}
 
       {cfg.mode === "ai" && (
-        <div className="mt-3 grid gap-3 sm:grid-cols-[1fr_auto]">
+        <div className="mt-3 space-y-3">
           <div>
             <label className="block font-mono text-[9px] uppercase tracking-wider text-muted-foreground">
-              instrukcja dla AI (persona, styl, czego unikać)
+              źródło AI
             </label>
-            <textarea
-              value={cfg.instruction}
-              onChange={(e) => setCfg({ ...cfg, instruction: e.target.value })}
-              rows={2}
-              disabled={running}
-              data-testid="autodm-instruction-input"
-              className="mt-1 w-full resize-none rounded-sm border border-border bg-input px-2 py-1.5 font-mono text-xs text-foreground outline-none focus:border-primary disabled:opacity-50"
-              placeholder="np. Odpisuj luźno, po polsku. Jeśli ktoś pyta o spotkanie — zaproponuj piątek 18:00."
-            />
+            <div className="mt-1 flex gap-2">
+              <Button
+                variant="outline"
+                type="button"
+                onClick={() => setCfg({ ...cfg, provider: "gemini", model: "gemini-2.5-flash-lite" })}
+                disabled={running}
+                data-testid="autodm-provider-gemini"
+                className={`flex-1 rounded-sm border px-2 py-2 font-mono text-[10px] uppercase tracking-wider transition-colors ${
+                  cfg.provider === "gemini"
+                    ? "border-primary/50 bg-primary/10 text-primary"
+                    : "border-border bg-input text-muted-foreground hover:border-primary/30"
+                }`}
+              >
+                własny klucz Gemini · darmowy
+              </Button>
+              <Button
+                variant="outline"
+                type="button"
+                onClick={() => setCfg({ ...cfg, provider: "openai", model: "gpt-5.4" })}
+                disabled={running}
+                data-testid="autodm-provider-openai"
+                className={`flex-1 rounded-sm border px-2 py-2 font-mono text-[10px] uppercase tracking-wider transition-colors ${
+                  cfg.provider === "openai"
+                    ? "border-accent/50 bg-accent/10 text-accent"
+                    : "border-border bg-input text-muted-foreground hover:border-accent/30"
+                }`}
+              >
+                klucz uniwersalny · płatny
+              </Button>
+            </div>
           </div>
-          <div>
-            <label className="block font-mono text-[9px] uppercase tracking-wider text-muted-foreground">
-              model
-            </label>
-            <select
-              value={cfg.model}
-              onChange={(e) => setCfg({ ...cfg, model: e.target.value })}
-              disabled={running}
-              data-testid="autodm-model-select"
-              className="mt-1 w-full rounded-sm border border-border bg-input px-2 py-1.5 font-mono text-xs text-foreground outline-none focus:border-primary disabled:opacity-50 sm:w-44"
-            >
-              {AI_MODELS.map(([v, l]) => (
-                <option key={v} value={v}>
-                  {l}
-                </option>
-              ))}
-            </select>
+          {cfg.provider === "gemini" && (
+            <div>
+              <label className="block font-mono text-[9px] uppercase tracking-wider text-muted-foreground">
+                klucz Google AI Studio (aistudio.google.com/api-keys → Create API key, darmowy)
+              </label>
+              <input
+                type="password"
+                value={cfg.geminiKey}
+                onChange={(e) => setCfg({ ...cfg, geminiKey: e.target.value })}
+                disabled={running}
+                data-testid="autodm-gemini-key-input"
+                className="mt-1 w-full rounded-sm border border-border bg-input px-2 py-1.5 font-mono text-xs text-foreground outline-none focus:border-primary disabled:opacity-50"
+                placeholder="AIza..."
+              />
+              <p className="mt-1 font-mono text-[9px] leading-snug text-muted-foreground">
+                klucz zostaje tylko w Twojej przeglądarce — leci prosto do Google przy każdej
+                odpowiedzi, nigdy nie trafia do bazy.
+              </p>
+            </div>
+          )}
+          <div className="grid gap-3 sm:grid-cols-[1fr_auto]">
+            <div>
+              <label className="block font-mono text-[9px] uppercase tracking-wider text-muted-foreground">
+                instrukcja dla AI (persona, styl, czego unikać)
+              </label>
+              <textarea
+                value={cfg.instruction}
+                onChange={(e) => setCfg({ ...cfg, instruction: e.target.value })}
+                rows={2}
+                disabled={running}
+                data-testid="autodm-instruction-input"
+                className="mt-1 w-full resize-none rounded-sm border border-border bg-input px-2 py-1.5 font-mono text-xs text-foreground outline-none focus:border-primary disabled:opacity-50"
+                placeholder="np. Odpisuj luźno, po polsku. Jeśli ktoś pyta o spotkanie — zaproponuj piątek 18:00."
+              />
+            </div>
+            <div>
+              <label className="block font-mono text-[9px] uppercase tracking-wider text-muted-foreground">
+                model
+              </label>
+              <select
+                value={cfg.model}
+                onChange={(e) => setCfg({ ...cfg, model: e.target.value })}
+                disabled={running}
+                data-testid="autodm-model-select"
+                className="mt-1 w-full rounded-sm border border-border bg-input px-2 py-1.5 font-mono text-xs text-foreground outline-none focus:border-primary disabled:opacity-50 sm:w-56"
+              >
+                {(cfg.provider === "gemini" ? AI_MODELS_GEMINI : AI_MODELS_OPENAI).map(([v, l]) => (
+                  <option key={v} value={v}>
+                    {l}
+                  </option>
+                ))}
+              </select>
+            </div>
           </div>
         </div>
       )}
@@ -469,9 +545,9 @@ export function AutoDmPanel({ token, isBot, onLog, onAlert, onRecord }) {
       </div>
       <p className="mt-3 font-mono text-[10px] leading-relaxed text-muted-foreground">
         <MessageSquareReply className="mr-1 inline size-3.5 text-accent" />
-        tryb AI używa klucza uniwersalnego Emergent (obciąża saldo klucza) — do prostych pytań
-        wystarczy tryb reguł, który jest darmowy. każda auto-odpowiedź trafia do historii jako
-        „auto-dm".
+        tryb AI: własny darmowy klucz Gemini albo klucz uniwersalny Emergent (obciąża saldo) — do
+        prostych pytań wystarczy tryb reguł, który jest darmowy. każda auto-odpowiedź trafia do
+        historii jako „auto-dm".
       </p>
     </motion.section>
   );

@@ -125,16 +125,24 @@ class EmojiEntry(BaseModel):
     guild: Optional[str] = None
 
 
+class EmbedInput(BaseModel):
+    title: str = ""
+    description: str = ""
+    color: str = "#5af169"
+    imageUrl: str = ""
+
+
 class SendInput(BaseModel):
     token: str
     channelId: str
-    message: str
+    message: str = ""
     isBot: bool = True
     typing: bool = False
     typingMs: int = 1500
     typingBurst: bool = False
     profileSeed: Optional[int] = None
     emojiMap: Optional[Dict[str, EmojiEntry]] = None
+    embed: Optional[EmbedInput] = None
 
 
 class EmojiFetchInput(BaseModel):
@@ -177,7 +185,11 @@ async def root():
 
 @api_router.post("/discord/send")
 async def send_discord_message(data: SendInput):
-    if not data.token or not data.channelId or not data.message:
+    has_embed = bool(
+        data.embed
+        and (data.embed.title.strip() or data.embed.description.strip() or data.embed.imageUrl.strip())
+    )
+    if not data.token or not data.channelId or (not data.message.strip() and not has_embed):
         return {"ok": False, "status": 400, "error": "Missing fields"}
     if len(data.message) > 2000:
         return {"ok": False, "status": 400, "error": "Message too long (max 2000)"}
@@ -242,6 +254,19 @@ async def send_discord_message(data: SendInput):
                                 pass
 
             body = {"content": content, "tts": False, "flags": 0}
+            if has_embed:
+                e = {}
+                if data.embed.title.strip():
+                    e["title"] = data.embed.title[:256]
+                if data.embed.description.strip():
+                    e["description"] = data.embed.description[:4096]
+                cm = re.fullmatch(r"#?([0-9a-fA-F]{6})", data.embed.color.strip())
+                if cm:
+                    e["color"] = int(cm.group(1), 16)
+                if re.match(r"^https?://", data.embed.imageUrl.strip()):
+                    e["image"] = {"url": data.embed.imageUrl.strip()}
+                if e:
+                    body["embeds"] = [e]
             if not data.isBot:
                 body["nonce"] = str(int(time.time() * 1000) * 1000 + random.randint(0, 999))
 
@@ -389,18 +414,48 @@ async def dm_messages(data: DmMessagesInput):
         return {"ok": False, "status": 0, "error": str(err)}
 
 
+@api_router.post("/discord/me")
+async def discord_me(data: EmojiFetchInput):
+    if not data.token:
+        return {"ok": False, "status": 400, "error": "Missing token"}
+    headers = build_headers(data.token, data.isBot)
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as http:
+            r = await http.get(f"{DISCORD_API}/users/@me", headers=headers)
+            if r.status_code != 200:
+                return {"ok": False, "status": r.status_code, "error": r.text[:200]}
+            me = r.json()
+            return {
+                "ok": True,
+                "id": me.get("id"),
+                "username": me.get("global_name") or me.get("username") or "?",
+                "bot": bool(me.get("bot")),
+            }
+    except Exception as err:
+        return {"ok": False, "status": 0, "error": str(err)}
+
+
 class AiReplyInput(BaseModel):
     instruction: str = ""
     model: str = "gpt-5.4"
+    provider: str = "openai"
+    geminiKey: Optional[str] = None
     history: list = []
     channelKey: str = "dm"
 
 
 @api_router.post("/ai/reply")
 async def ai_reply(data: AiReplyInput):
-    api_key = os.environ.get("EMERGENT_LLM_KEY")
-    if not api_key:
-        return {"ok": False, "error": "brak skonfigurowanego klucza AI"}
+    if data.provider == "gemini":
+        if not data.geminiKey or not data.geminiKey.strip():
+            return {"ok": False, "error": "brak własnego klucza Gemini — wklej go w zakładce Auto DM"}
+        api_key = data.geminiKey.strip()
+        provider = "gemini"
+    else:
+        api_key = os.environ.get("EMERGENT_LLM_KEY")
+        provider = "openai"
+        if not api_key:
+            return {"ok": False, "error": "brak skonfigurowanego klucza AI"}
     system = (
         "Jesteś właścicielem tego konta Discord i odpisujesz na prywatne wiadomości. "
         "Odpowiadaj krótko (1-2 zdania), naturalnie i po polsku, jak człowiek. "
@@ -421,7 +476,7 @@ async def ai_reply(data: AiReplyInput):
             api_key=api_key,
             session_id=f"ghostdm-{uuid.uuid4()}",
             system_message=system,
-        ).with_model("openai", data.model)
+        ).with_model(provider, data.model)
         um = UserMessage(
             text=f"Ostatnie wiadomości DM:\n{transcript}\n\nNapisz teraz jedną krótką odpowiedź jako 'Ty'."
         )

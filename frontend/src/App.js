@@ -9,7 +9,7 @@ import { StatsPanel } from "@/components/StatsPanel";
 import { WelcomeScreen } from "@/components/WelcomeScreen";
 import { AutoDmPanel } from "@/components/AutoDmPanel";
 import { DAY_LABELS, fmtDur, nextRunInMs, playAlertSound, resolveSpintax, resolveVars } from "@/lib/ghost";
-import { Layers, Eye, BarChart3, FolderOpen, Terminal, Trash2, MoonStar, MessageSquareReply, BellRing } from "lucide-react";
+import { Layers, Eye, BarChart3, FolderOpen, Terminal, Trash2, MoonStar, MessageSquareReply, BellRing, CopyPlus, BadgeCheck } from "lucide-react";
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 
@@ -20,8 +20,13 @@ const newTarget = () => ({
   message: "",
   delaySec: 60,
   loop: true,
+  maxPerDay: 0,
   schedule: { mode: "now", time: "21:00", days: [1, 2, 3, 4, 5] },
+  embed: { enabled: false, title: "", description: "", color: "#5af169", imageUrl: "" },
 });
+
+const embedHasContent = (e) =>
+  !!(e?.enabled && (e.title.trim() || e.description.trim() || e.imageUrl.trim()));
 
 function jitter(base, jitterPct) {
   const delta = base * (jitterPct / 100);
@@ -107,6 +112,26 @@ const SESSION_KEY = "ghost-send:session";
 const ENTERED_KEY = "ghost-send:entered";
 const QUIET_KEY = "ghost-send:quiet";
 const ALERTS_KEY = "ghost-send:alerts";
+const DAILY_KEY = "ghost-send:daily";
+
+const readDaily = () => {
+  const today = new Date().toDateString();
+  try {
+    const d = JSON.parse(localStorage.getItem(DAILY_KEY) || "{}");
+    if (d.date !== today) return { date: today, counts: {} };
+    return { date: d.date, counts: d.counts || {} };
+  } catch {
+    return { date: today, counts: {} };
+  }
+};
+
+const bumpDaily = (tag) => {
+  const d = readDaily();
+  d.counts[tag] = (d.counts[tag] || 0) + 1;
+  try {
+    localStorage.setItem(DAILY_KEY, JSON.stringify(d));
+  } catch {}
+};
 
 const TICKER = [
   "kampanie równoległe",
@@ -119,6 +144,8 @@ const TICKER = [
   "alerty webhook",
   "godziny ciszy",
   "przerwy kawowe",
+  "embody",
+  "limity dzienne",
 ];
 
 export default function App() {
@@ -143,6 +170,8 @@ export default function App() {
   const [stats, setStats] = useState({ sent: 0, failed: 0 });
   const [quiet, setQuiet] = useState({ enabled: false, from: "01:00", to: "07:00" });
   const [alerts, setAlerts] = useState({ sound: true, webhook: "" });
+  const [identity, setIdentity] = useState(null);
+  const [checking, setChecking] = useState(false);
 
   const [profiles, setProfiles] = useState({});
   const [profileName, setProfileName] = useState("");
@@ -217,6 +246,7 @@ export default function App() {
           ...newTarget(),
           ...t,
           schedule: { ...newTarget().schedule, ...(t.schedule || {}) },
+          embed: { ...newTarget().embed, ...(t.embed || {}) },
           id: Math.random().toString(36).slice(2, 9),
         }))
       );
@@ -345,6 +375,20 @@ export default function App() {
   const addTarget = () => setTargets((ts) => [...ts, newTarget()]);
   const removeTarget = (id) =>
     setTargets((ts) => (ts.length > 1 ? ts.filter((t) => t.id !== id) : ts));
+  const duplicateTarget = (id) =>
+    setTargets((ts) => {
+      const i = ts.findIndex((t) => t.id === id);
+      if (i < 0) return ts;
+      const src = ts[i];
+      const copy = {
+        ...src,
+        id: Math.random().toString(36).slice(2, 9),
+        name: `${src.name} kopia`,
+        schedule: { ...src.schedule, days: [...src.schedule.days] },
+        embed: { ...src.embed },
+      };
+      return [...ts.slice(0, i + 1), copy, ...ts.slice(i + 1)];
+    });
 
   const recordHistory = (tag, channelId, message, ok, status, error) => {
     axios
@@ -357,6 +401,29 @@ export default function App() {
         error: error ? String(error).slice(0, 200) : null,
       })
       .catch(() => {});
+  };
+
+  const onCheckToken = async () => {
+    if (!token.trim()) {
+      append("✗ WYMAGANY TOKEN");
+      return;
+    }
+    setChecking(true);
+    try {
+      const res = (await axios.post(`${API}/discord/me`, { token, isBot })).data;
+      if (res.ok) {
+        setIdentity(res.username);
+        append(`✓ token OK — zalogowano jako ${res.username}${res.bot ? " (bot)" : ""}`);
+      } else {
+        setIdentity(null);
+        append(`✗ token → ${res.status}: ${String(res.error).slice(0, 80)}`);
+      }
+    } catch (err) {
+      setIdentity(null);
+      append(`✗ ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setChecking(false);
+    }
   };
 
   const onLoadEmojis = async () => {
@@ -397,8 +464,19 @@ export default function App() {
         await wait(qMs);
         if (stopRef.current) break;
       }
+      if (t.maxPerDay > 0) {
+        const d = readDaily();
+        if ((d.counts[tag] || 0) >= t.maxPerDay) {
+          const now = new Date();
+          const mid = new Date(now);
+          mid.setHours(24, 0, 0, 0);
+          append(`⏸ [${tag}] limit dzienny ${t.maxPerDay}/dzień — pauza do północy (${fmtDur(mid - now)})`);
+          await wait(mid - now);
+          if (stopRef.current) break;
+        }
+      }
       const content = resolveVars(resolveSpintax(t.message), sendIdx + 1);
-      const tMs = preset.humanTyping ? humanTypingMs(content) : 1500;
+      const tMs = preset.humanTyping ? humanTypingMs(content || t.embed.description) : 1500;
       if (preset.typing)
         append(`✎ [${tag}] pisanie (~${(tMs / 1000).toFixed(1)}s)${userBurst ? " · z pauzami" : ""}`);
       try {
@@ -413,12 +491,21 @@ export default function App() {
             typingBurst: userBurst,
             profileSeed: userMode ? seed : undefined,
             emojiMap: Object.keys(emojiMap).length ? emojiMap : undefined,
+            embed: embedHasContent(t.embed)
+              ? {
+                  title: resolveVars(resolveSpintax(t.embed.title), sendIdx + 1),
+                  description: resolveVars(resolveSpintax(t.embed.description), sendIdx + 1),
+                  color: t.embed.color,
+                  imageUrl: t.embed.imageUrl,
+                }
+              : undefined,
           })
         ).data;
         if (res.ok) {
           setStats((s) => ({ ...s, sent: s.sent + 1 }));
           append(`✓ [${tag}] wysłano`);
-          recordHistory(tag, t.channelId, content, true, res.status);
+          recordHistory(tag, t.channelId, content || `[embed] ${t.embed.title}`, true, res.status);
+          bumpDaily(tag);
           sentCount++;
           sendIdx++;
           if (userMode && preset.coffee && sentCount >= nextCoffee) {
@@ -432,7 +519,7 @@ export default function App() {
         } else {
           setStats((s) => ({ ...s, failed: s.failed + 1 }));
           append(`✗ [${tag}] ${res.status}: ${String(res.error).slice(0, 80)}`);
-          recordHistory(tag, t.channelId, content, false, res.status, res.error);
+          recordHistory(tag, t.channelId, content || `[embed] ${t.embed.title}`, false, res.status, res.error);
           if (res.status === 1015) {
             const backoff = Math.max(300000, Math.round((res.retryAfter ?? 300) * 1000));
             append(`⏸ [${tag}] cloudflare 1015 · przerwa ${(backoff / 1000).toFixed(0)}s (długi backoff)`);
@@ -493,7 +580,9 @@ export default function App() {
       setActiveTab("logs");
       return;
     }
-    const valid = targets.filter((t) => t.channelId.trim() && t.message.trim());
+    const valid = targets.filter(
+      (t) => t.channelId.trim() && (t.message.trim() || embedHasContent(t.embed))
+    );
     if (valid.length === 0) {
       append("✗ DODAJ PRZYNAJMNIEJ JEDNĄ KAMPANIĘ");
       setActiveTab("logs");
@@ -717,14 +806,14 @@ export default function App() {
                 <div className="flex gap-2">
                   <TokenTypeButton
                     active={isBot}
-                    onClick={() => setIsBot(true)}
+                    onClick={() => { setIsBot(true); setIdentity(null); }}
                     label="BOT"
                     hint="zalecane"
                     testId="token-bot-btn"
                   />
                   <TokenTypeButton
                     active={!isBot}
-                    onClick={() => setIsBot(false)}
+                    onClick={() => { setIsBot(false); setIdentity(null); }}
                     label="USER"
                     hint="ryzyko ToS"
                     testId="token-user-btn"
@@ -733,14 +822,32 @@ export default function App() {
                 <label className="mt-4 block font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
                   token
                 </label>
-                <input
-                  type="password"
-                  value={token}
-                  onChange={(e) => setToken(e.target.value)}
-                  data-testid="token-input"
-                  className="mt-1 w-full rounded-md border border-border bg-input px-3 py-2 font-mono text-sm text-foreground outline-none transition-colors focus:border-primary focus:shadow-[0_0_0_1px_hsl(var(--primary))]"
-                  placeholder="•••••••••••••••••••"
-                />
+                <div className="mt-1 flex gap-2">
+                  <input
+                    type="password"
+                    value={token}
+                    onChange={(e) => { setToken(e.target.value); setIdentity(null); }}
+                    data-testid="token-input"
+                    className="w-full rounded-md border border-border bg-input px-3 py-2 font-mono text-sm text-foreground outline-none transition-colors focus:border-primary focus:shadow-[0_0_0_1px_hsl(var(--primary))]"
+                    placeholder="•••••••••••••••••••"
+                  />
+                  <Button
+                    variant="outline"
+                    type="button"
+                    onClick={onCheckToken}
+                    disabled={checking}
+                    data-testid="check-token-btn"
+                    className="shrink-0 rounded-md border border-accent/40 bg-accent/10 px-3 py-2 font-mono text-[10px] uppercase tracking-wider text-accent transition-colors hover:bg-accent/20 disabled:opacity-50"
+                  >
+                    <BadgeCheck className="size-3.5" />
+                    {checking ? "sprawdzam..." : "sprawdź"}
+                  </Button>
+                </div>
+                {identity && (
+                  <p data-testid="token-identity" className="mt-2 font-mono text-[10px] text-primary">
+                    ✓ zalogowano: {identity}
+                  </p>
+                )}
               </Panel>
 
               <Panel
@@ -801,16 +908,28 @@ export default function App() {
                             placeholder="nazwa kampanii"
                           />
                         </div>
-                        <Button
-                          variant="outline"
-                          type="button"
-                          onClick={() => removeTarget(t.id)}
-                          disabled={targets.length === 1}
-                          data-testid={`campaign-remove-btn-${t.id}`}
-                          className="font-mono text-[10px] uppercase tracking-wider text-destructive opacity-0 transition-opacity hover:underline disabled:opacity-0 group-hover:opacity-100"
-                        >
-                          usuń
-                        </Button>
+                        <div className="flex items-center gap-3">
+                          <Button
+                            variant="outline"
+                            type="button"
+                            onClick={() => duplicateTarget(t.id)}
+                            data-testid={`campaign-duplicate-btn-${t.id}`}
+                            title="Duplikuj kampanię"
+                            className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground opacity-0 transition-opacity hover:text-primary hover:underline group-hover:opacity-100"
+                          >
+                            <CopyPlus className="size-3" />
+                          </Button>
+                          <Button
+                            variant="outline"
+                            type="button"
+                            onClick={() => removeTarget(t.id)}
+                            disabled={targets.length === 1}
+                            data-testid={`campaign-remove-btn-${t.id}`}
+                            className="font-mono text-[10px] uppercase tracking-wider text-destructive opacity-0 transition-opacity hover:underline disabled:opacity-0 group-hover:opacity-100"
+                          >
+                            usuń
+                          </Button>
+                        </div>
                       </div>
                       <label className="block font-mono text-[9px] uppercase tracking-wider text-muted-foreground">
                         id kanału
@@ -831,12 +950,12 @@ export default function App() {
                         rows={2}
                         data-testid={`campaign-message-input-${t.id}`}
                         className="mt-1 w-full resize-none rounded-sm border border-border bg-input px-2 py-1.5 font-mono text-xs text-foreground outline-none focus:border-primary"
-                        placeholder="np. {Cześć|Hej}! Dziś {dzien}, wiadomość nr {licznik}"
+                        placeholder="np. {Cześć|Hej}! Dziś {dzien}, wiadomość nr {licznik} — puste, gdy sam embed"
                       />
-                      <div className="mt-2 grid grid-cols-[1fr_auto] items-end gap-3">
-                        <div>
+                      <div className="mt-2 flex flex-wrap items-end gap-3">
+                        <div className="min-w-32 flex-1">
                           <label className="block font-mono text-[9px] uppercase tracking-wider text-muted-foreground">
-                            opóźnienie przed kolejną wiadomością (sekundy)
+                            opóźnienie (sekundy)
                           </label>
                           <input
                             type="number"
@@ -846,6 +965,21 @@ export default function App() {
                               updateTarget(t.id, { delaySec: Math.max(1, Number(e.target.value) || 1) })
                             }
                             data-testid={`campaign-delay-input-${t.id}`}
+                            className="mt-1 w-full rounded-sm border border-border bg-input px-2 py-1.5 font-mono text-xs text-foreground outline-none focus:border-primary"
+                          />
+                        </div>
+                        <div className="w-28">
+                          <label className="block font-mono text-[9px] uppercase tracking-wider text-muted-foreground">
+                            limit/dzień (0=bez)
+                          </label>
+                          <input
+                            type="number"
+                            min={0}
+                            value={t.maxPerDay}
+                            onChange={(e) =>
+                              updateTarget(t.id, { maxPerDay: Math.max(0, Number(e.target.value) || 0) })
+                            }
+                            data-testid={`campaign-dailylimit-input-${t.id}`}
                             className="mt-1 w-full rounded-sm border border-border bg-input px-2 py-1.5 font-mono text-xs text-foreground outline-none focus:border-primary"
                           />
                         </div>
@@ -860,6 +994,56 @@ export default function App() {
                           pętla
                         </label>
                       </div>
+
+                      <div className="mt-2 rounded-sm border border-border bg-input/30 p-2.5">
+                        <label className="flex items-center gap-2 font-mono text-[9px] uppercase tracking-wider text-muted-foreground">
+                          <input
+                            type="checkbox"
+                            checked={t.embed.enabled}
+                            onChange={(e) => updateTarget(t.id, { embed: { ...t.embed, enabled: e.target.checked } })}
+                            className="accent-primary"
+                            data-testid={`campaign-embed-toggle-${t.id}`}
+                          />
+                          embed (bogata karta: tytuł, opis, kolor, obrazek)
+                        </label>
+                        {t.embed.enabled && (
+                          <div className="mt-2 space-y-2" data-testid={`campaign-embed-editor-${t.id}`}>
+                            <div className="grid gap-2 sm:grid-cols-[1fr_auto]">
+                              <input
+                                value={t.embed.title}
+                                onChange={(e) => updateTarget(t.id, { embed: { ...t.embed, title: e.target.value } })}
+                                data-testid={`campaign-embed-title-${t.id}`}
+                                className="rounded-sm border border-border bg-input px-2 py-1.5 font-mono text-xs text-foreground outline-none focus:border-primary"
+                                placeholder="tytuł embedu"
+                              />
+                              <input
+                                type="color"
+                                value={t.embed.color}
+                                onChange={(e) => updateTarget(t.id, { embed: { ...t.embed, color: e.target.value } })}
+                                data-testid={`campaign-embed-color-${t.id}`}
+                                title="Kolor paska embedu"
+                                className="h-8 w-12 cursor-pointer rounded-sm border border-border bg-input p-0.5"
+                              />
+                            </div>
+                            <textarea
+                              value={t.embed.description}
+                              onChange={(e) => updateTarget(t.id, { embed: { ...t.embed, description: e.target.value } })}
+                              rows={2}
+                              data-testid={`campaign-embed-description-${t.id}`}
+                              className="w-full resize-none rounded-sm border border-border bg-input px-2 py-1.5 font-mono text-xs text-foreground outline-none focus:border-primary"
+                              placeholder="opis embedu — działa {a|b} i zmienne"
+                            />
+                            <input
+                              value={t.embed.imageUrl}
+                              onChange={(e) => updateTarget(t.id, { embed: { ...t.embed, imageUrl: e.target.value } })}
+                              data-testid={`campaign-embed-image-${t.id}`}
+                              className="w-full rounded-sm border border-border bg-input px-2 py-1.5 font-mono text-xs text-foreground outline-none focus:border-primary"
+                              placeholder="url obrazka (https://...)"
+                            />
+                          </div>
+                        )}
+                      </div>
+
                       <div className="mt-2 grid gap-3 sm:grid-cols-[1fr_auto]">
                         <div>
                           <label className="block font-mono text-[9px] uppercase tracking-wider text-muted-foreground">

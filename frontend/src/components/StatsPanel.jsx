@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import axios from "axios";
 import { motion } from "framer-motion";
 import { Button } from "@/components/ui/button";
-import { RefreshCw, Trash2, BarChart3 } from "lucide-react";
+import { RefreshCw, Trash2, BarChart3, Download } from "lucide-react";
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 
@@ -35,6 +35,30 @@ export function StatsPanel() {
     load();
   };
 
+  const onExportCsv = async () => {
+    try {
+      const h = await axios.get(`${API}/history?limit=200`);
+      const rows = h.data.items || [];
+      if (!rows.length) return;
+      const esc = (v) => `"${String(v ?? "").replaceAll('"', '""')}"`;
+      const csv = [
+        "timestamp;kampania;kanal;ok;status;wiadomosc;blad",
+        ...rows.map((r) =>
+          [r.timestamp, r.campaign, r.channelId, r.ok ? "1" : "0", r.status, r.message, r.error || ""]
+            .map(esc)
+            .join(";")
+        ),
+      ].join("\n");
+      const blob = new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `ghost-send-historia-${Date.now()}.csv`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch {}
+  };
+
   const maxDay = Math.max(1, ...(stats?.byDay || []).map((d) => d.sent + d.failed));
 
   return (
@@ -45,10 +69,21 @@ export function StatsPanel() {
       className="space-y-6"
       data-testid="stats-panel"
     >
-      <div className="flex items-center gap-3 border-b border-border pb-4">
+      <div className="flex flex-wrap items-center gap-3 border-b border-border pb-4">
         <BarChart3 className="size-5 text-primary" />
         <h2 className="text-lg font-semibold">Historia i statystyki wysyłek</h2>
         <div className="ml-auto flex items-center gap-2">
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={onExportCsv}
+            disabled={!items.length}
+            data-testid="stats-export-csv-btn"
+            className="rounded-sm border border-accent/40 bg-accent/10 font-mono text-[10px] uppercase tracking-wider text-accent hover:bg-accent/20"
+          >
+            <Download /> csv
+          </Button>
           <Button
             type="button"
             variant="outline"

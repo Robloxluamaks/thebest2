@@ -298,7 +298,68 @@ async def send_discord_message(data: SendInput):
                     "retryAfter": 300 if cloudflare else retry_after,
                     "cloudflare": cloudflare,
                 }
-            return {"ok": True, "status": res.status_code}
+            msg_id = None
+            try:
+                msg_id = res.json().get("id")
+            except Exception:
+                pass
+            return {"ok": True, "status": res.status_code, "id": msg_id}
+    except Exception as err:
+        return {"ok": False, "status": 0, "error": str(err)}
+
+
+class EditInput(BaseModel):
+    token: str
+    channelId: str
+    messageId: str
+    message: str
+    isBot: bool = True
+    profileSeed: Optional[int] = None
+
+
+@api_router.post("/discord/edit")
+async def edit_discord_message(data: EditInput):
+    if not data.token or not re.fullmatch(r"\d{5,25}", data.channelId or "") or not re.fullmatch(r"\d{5,25}", data.messageId or ""):
+        return {"ok": False, "status": 400, "error": "Invalid input"}
+    if len(data.message) > 2000:
+        return {"ok": False, "status": 400, "error": "Message too long (max 2000)"}
+    headers = build_headers(data.token, data.isBot, data.channelId, data.profileSeed)
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as http:
+            r = await http.patch(
+                f"{DISCORD_API}/channels/{data.channelId}/messages/{data.messageId}",
+                headers=headers,
+                json={"content": data.message},
+            )
+            if r.status_code not in (200, 201):
+                return {"ok": False, "status": r.status_code, "error": r.text[:300]}
+            return {"ok": True, "status": r.status_code}
+    except Exception as err:
+        return {"ok": False, "status": 0, "error": str(err)}
+
+
+class DeleteInput(BaseModel):
+    token: str
+    channelId: str
+    messageId: str
+    isBot: bool = True
+    profileSeed: Optional[int] = None
+
+
+@api_router.post("/discord/delete")
+async def delete_discord_message(data: DeleteInput):
+    if not data.token or not re.fullmatch(r"\d{5,25}", data.channelId or "") or not re.fullmatch(r"\d{5,25}", data.messageId or ""):
+        return {"ok": False, "status": 400, "error": "Invalid input"}
+    headers = build_headers(data.token, data.isBot, data.channelId, data.profileSeed)
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0)) as http:
+            r = await http.delete(
+                f"{DISCORD_API}/channels/{data.channelId}/messages/{data.messageId}",
+                headers=headers,
+            )
+            if r.status_code not in (200, 204):
+                return {"ok": False, "status": r.status_code, "error": r.text[:300]}
+            return {"ok": True, "status": r.status_code}
     except Exception as err:
         return {"ok": False, "status": 0, "error": str(err)}
 
@@ -494,6 +555,72 @@ async def ai_reply(data: AiReplyInput):
         return {"ok": False, "error": str(err)[:300]}
 
 
+class AiComposeInput(BaseModel):
+    mode: str = "generate"  # generate | improve | spintax
+    brief: str = ""
+    current: str = ""
+    tone: str = "neutralny"
+    model: str = "gpt-5.4"
+    variants: int = 3
+
+
+@api_router.post("/ai/compose")
+async def ai_compose(data: AiComposeInput):
+    api_key = os.environ.get("EMERGENT_LLM_KEY")
+    if not api_key:
+        return {"ok": False, "error": "brak skonfigurowanego klucza AI"}
+
+    if data.mode == "improve":
+        system = (
+            "Jesteś copywriterem ogłoszeń na serwery Discord. Ulepsz podaną wiadomość: "
+            "popraw styl, chwytliwość i czytelność, zachowaj sens i język polski. "
+            "Zachowaj istniejące znaczniki Discord (emoji :nazwa:, wzmianki, linki) oraz "
+            "ewentualny spintax {a|b} i zmienne {data} {czas} {dzien} {licznik}. "
+            "Zwróć TYLKO gotową treść, bez komentarzy, cudzysłowów i nagłówków."
+        )
+        user_text = f"Ton: {data.tone}\nWiadomość do ulepszenia:\n{data.current.strip()}"
+    elif data.mode == "spintax":
+        system = (
+            "Jesteś generatorem spintaxu dla ogłoszeń Discord. Na podstawie wiadomości stwórz JEDNĄ "
+            "wersję ze spintaxem w składni {wariant1|wariant2|wariant3}, wstawiając warianty w "
+            f"kluczowych miejscach (powitanie, słowa kluczowe, zakończenie), około {max(2, min(6, data.variants))} "
+            "grup wariantów. Zachowaj język polski, sens i istniejące znaczniki. "
+            "Zwróć TYLKO treść ze spintaxem, bez komentarzy ani cudzysłowów."
+        )
+        user_text = f"Wiadomość bazowa:\n{data.current.strip()}"
+    else:
+        system = (
+            "Jesteś copywriterem ogłoszeń na serwery Discord. Napisz krótkie, chwytliwe ogłoszenie "
+            f"po polsku w tonie: {data.tone}. Maksymalnie 3-5 zdań, bez list i nagłówków. "
+            "Możesz użyć 1-2 emoji jeśli pasują. Zwróć TYLKO treść ogłoszenia, bez komentarzy ani cudzysłowów."
+        )
+        user_text = f"Temat/brief ogłoszenia:\n{data.brief.strip()}"
+
+    if not user_text.strip() or (data.mode != "generate" and not data.current.strip()) or (data.mode == "generate" and not data.brief.strip()):
+        return {"ok": False, "error": "brak treści wejściowej"}
+
+    try:
+        from emergentintegrations.llm.chat import LlmChat, UserMessage, TextDelta, StreamDone
+
+        chat = LlmChat(
+            api_key=api_key,
+            session_id=f"ghostcompose-{uuid.uuid4()}",
+            system_message=system,
+        ).with_model("openai", data.model)
+        out = ""
+        async for ev in chat.stream_message(UserMessage(text=user_text)):
+            if isinstance(ev, TextDelta):
+                out += ev.content
+            elif isinstance(ev, StreamDone):
+                break
+        out = out.strip().strip('"').strip()
+        if not out:
+            return {"ok": False, "error": "pusta odpowiedź AI"}
+        return {"ok": True, "text": out[:1900]}
+    except Exception as err:
+        return {"ok": False, "error": str(err)[:300]}
+
+
 class AlertRelayInput(BaseModel):
     url: str
     payload: dict
@@ -571,6 +698,30 @@ async def history_stats():
         "byCampaign": by_campaign,
         "byDay": by_day,
     }
+
+
+@api_router.get("/history/heatmap")
+async def history_heatmap():
+    # Aggregate successful sends into a day-of-week (0=Mon..6=Sun) × hour (0..23) grid.
+    raw = await db.send_history.find(
+        {"ok": True}, {"_id": 0, "timestamp": 1}
+    ).to_list(50000)
+    grid = [[0] * 24 for _ in range(7)]
+    peak = 0
+    for r in raw:
+        ts = r.get("timestamp")
+        if not ts:
+            continue
+        try:
+            dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        except Exception:
+            continue
+        dow = dt.weekday()  # Mon=0
+        hr = dt.hour
+        grid[dow][hr] += 1
+        if grid[dow][hr] > peak:
+            peak = grid[dow][hr]
+    return {"grid": grid, "peak": peak, "total": len(raw)}
 
 
 @api_router.delete("/history")

@@ -8,8 +8,9 @@ import { CampaignPreview } from "@/components/CampaignPreview";
 import { StatsPanel } from "@/components/StatsPanel";
 import { WelcomeScreen } from "@/components/WelcomeScreen";
 import { AutoDmPanel } from "@/components/AutoDmPanel";
+import { AiComposeModal } from "@/components/AiComposeModal";
 import { DAY_LABELS, fmtDur, nextRunInMs, playAlertSound, resolveSpintax, resolveVars } from "@/lib/ghost";
-import { Layers, Eye, BarChart3, FolderOpen, Terminal, Trash2, MoonStar, MessageSquareReply, BellRing, CopyPlus, BadgeCheck } from "lucide-react";
+import { Layers, Eye, BarChart3, FolderOpen, Terminal, Trash2, MoonStar, MessageSquareReply, BellRing, CopyPlus, BadgeCheck, Sparkles, SlidersHorizontal, BookMarked } from "lucide-react";
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 
@@ -23,6 +24,16 @@ const newTarget = () => ({
   maxPerDay: 0,
   schedule: { mode: "now", time: "21:00", days: [1, 2, 3, 4, 5] },
   embed: { enabled: false, title: "", description: "", color: "#5af169", imageUrl: "" },
+  advanced: {
+    enabled: false,
+    startDelaySec: 0,
+    jitterPct: 0,
+    adaptive: false,
+    stopAfterCount: 0,
+    stopAfterMin: 0,
+    autoEdit: { enabled: false, delaySec: 30, text: "" },
+    autoDelete: { enabled: false, afterSec: 60 },
+  },
 });
 
 const embedHasContent = (e) =>
@@ -113,6 +124,7 @@ const ENTERED_KEY = "ghost-send:entered";
 const QUIET_KEY = "ghost-send:quiet";
 const ALERTS_KEY = "ghost-send:alerts";
 const DAILY_KEY = "ghost-send:daily";
+const TEMPLATES_KEY = "ghost-send:templates";
 
 const readDaily = () => {
   const today = new Date().toDateString();
@@ -169,7 +181,7 @@ export default function App() {
   const [log, setLog] = useState([]);
   const [stats, setStats] = useState({ sent: 0, failed: 0 });
   const [quiet, setQuiet] = useState({ enabled: false, from: "01:00", to: "07:00" });
-  const [alerts, setAlerts] = useState({ sound: true, webhook: "" });
+  const [alerts, setAlerts] = useState({ sound: true, webhook: "", logs: false });
   const [identity, setIdentity] = useState(null);
   const [checking, setChecking] = useState(false);
 
@@ -177,6 +189,10 @@ export default function App() {
   const [profileName, setProfileName] = useState("");
   const [selectedProfile, setSelectedProfile] = useState("");
   const [includeToken, setIncludeToken] = useState(false);
+  const [templates, setTemplates] = useState([]);
+  const [tplName, setTplName] = useState("");
+  const [tplText, setTplText] = useState("");
+  const [aiTargetId, setAiTargetId] = useState(null);
   const hydratedRef = useRef(false);
 
   useEffect(() => {
@@ -202,7 +218,9 @@ export default function App() {
       const q = localStorage.getItem(QUIET_KEY);
       if (q) setQuiet({ enabled: false, from: "01:00", to: "07:00", ...JSON.parse(q) });
       const a = localStorage.getItem(ALERTS_KEY);
-      if (a) setAlerts({ sound: true, webhook: "", ...JSON.parse(a) });
+      if (a) setAlerts({ sound: true, webhook: "", logs: false, ...JSON.parse(a) });
+      const tpl = localStorage.getItem(TEMPLATES_KEY);
+      if (tpl) setTemplates(JSON.parse(tpl));
     } catch {}
     hydratedRef.current = true;
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -230,6 +248,39 @@ export default function App() {
     } catch {}
   }, [alerts]);
 
+  useEffect(() => {
+    if (!hydratedRef.current) return;
+    try {
+      localStorage.setItem(TEMPLATES_KEY, JSON.stringify(templates));
+    } catch {}
+  }, [templates]);
+
+  const onSaveTemplate = () => {
+    const name = tplName.trim();
+    const text = tplText.trim();
+    if (!name || !text) {
+      append("✗ podaj nazwę i treść szablonu");
+      return;
+    }
+    setTemplates((ts) => [{ id: Math.random().toString(36).slice(2, 9), name, text }, ...ts.filter((t) => t.name !== name)]);
+    setTplName("");
+    setTplText("");
+    append(`✓ zapisano szablon "${name}"`);
+  };
+
+  const onDeleteTemplate = (id) => setTemplates((ts) => ts.filter((t) => t.id !== id));
+
+  const insertTemplate = (targetId, text) => {
+    setTargets((ts) =>
+      ts.map((t) =>
+        t.id === targetId
+          ? { ...t, message: t.message.trim() ? `${t.message}\n${text}` : text }
+          : t
+      )
+    );
+    append("✓ wstawiono szablon do kampanii");
+  };
+
   const handleEnter = () => {
     try {
       sessionStorage.setItem(ENTERED_KEY, "1");
@@ -247,6 +298,12 @@ export default function App() {
           ...t,
           schedule: { ...newTarget().schedule, ...(t.schedule || {}) },
           embed: { ...newTarget().embed, ...(t.embed || {}) },
+          advanced: {
+            ...newTarget().advanced,
+            ...(t.advanced || {}),
+            autoEdit: { ...newTarget().advanced.autoEdit, ...(t.advanced?.autoEdit || {}) },
+            autoDelete: { ...newTarget().advanced.autoDelete, ...(t.advanced?.autoDelete || {}) },
+          },
           id: Math.random().toString(36).slice(2, 9),
         }))
       );
@@ -344,8 +401,29 @@ export default function App() {
     append("■ ZATRZYMANO NA ŻĄDANIE");
   };
 
-  const append = (line) =>
+  const append = (line) => {
     setLog((l) => [`[${new Date().toLocaleTimeString()}] ${line}`, ...l].slice(0, 200));
+    // Webhook activity logs — forward meaningful events only (fire-and-forget).
+    if (alerts.logs && alerts.webhook?.trim() && /[✓✗■▶]/.test(line)) {
+      axios
+        .post(`${API}/alert/relay`, {
+          url: alerts.webhook.trim(),
+          payload: { event: "log", app: "GHOST.SEND", line, time: new Date().toISOString() },
+        })
+        .catch(() => {});
+    }
+  };
+
+  const onAiApply = (targetId, text, replace) => {
+    setTargets((ts) =>
+      ts.map((t) =>
+        t.id === targetId
+          ? { ...t, message: replace ? text : t.message.trim() ? `${t.message}\n${text}` : text }
+          : t
+      )
+    );
+    append(`✓ zastosowano treść z AI${replace ? " (zastąpiono)" : " (dopisano)"}`);
+  };
 
   const fireAlert = (campaign, status, error) => {
     if (alerts.sound) playAlertSound();
@@ -386,6 +464,11 @@ export default function App() {
         name: `${src.name} kopia`,
         schedule: { ...src.schedule, days: [...src.schedule.days] },
         embed: { ...src.embed },
+        advanced: {
+          ...src.advanced,
+          autoEdit: { ...src.advanced.autoEdit },
+          autoDelete: { ...src.advanced.autoDelete },
+        },
       };
       return [...ts.slice(0, i + 1), copy, ...ts.slice(i + 1)];
     });
@@ -448,16 +531,76 @@ export default function App() {
     }
   };
 
+  const scheduleAutoActions = (t, seed, msgId, tag) => {
+    if (!msgId || !t.advanced?.enabled) return;
+    const userMode = !isBot;
+    const adv = t.advanced;
+    if (adv.autoEdit?.enabled && adv.autoEdit.text.trim()) {
+      const delay = Math.max(2, adv.autoEdit.delaySec) * 1000;
+      setTimeout(() => {
+        const edited = resolveVars(resolveSpintax(adv.autoEdit.text), 0);
+        axios
+          .post(`${API}/discord/edit`, {
+            token,
+            channelId: t.channelId,
+            messageId: msgId,
+            message: edited,
+            isBot,
+            profileSeed: userMode ? seed : undefined,
+          })
+          .then((r) => append(r.data?.ok ? `✎ [${tag}] auto-edycja wysłana` : `✗ [${tag}] auto-edycja → ${r.data?.status}`))
+          .catch(() => {});
+      }, delay);
+    }
+    if (adv.autoDelete?.enabled) {
+      const delay = Math.max(2, adv.autoDelete.afterSec) * 1000;
+      setTimeout(() => {
+        axios
+          .post(`${API}/discord/delete`, {
+            token,
+            channelId: t.channelId,
+            messageId: msgId,
+            isBot,
+            profileSeed: userMode ? seed : undefined,
+          })
+          .then((r) => append(r.data?.ok ? `🗑 [${tag}] auto-usunięcie wykonane` : `✗ [${tag}] auto-usunięcie → ${r.data?.status}`))
+          .catch(() => {});
+      }, delay);
+    }
+  };
+
   const runCampaign = async (t, seed) => {
     const tag = t.name.trim() || `#${t.channelId.slice(-6)}`;
     const preset = STEALTH[stealth];
     const userMode = !isBot;
     const userBurst = userMode && preset.burst;
+    const adv = t.advanced || {};
+    const effJitter = adv.enabled && adv.jitterPct > 0 ? adv.jitterPct : preset.jitterPct;
+    const startedAt = Date.now();
+    let adaptiveMult = 1;
     let sentCount = 0;
     let sendIdx = 0;
     let nextCoffee = preset.coffee ? randInt(preset.coffee.every[0], preset.coffee.every[1]) : Infinity;
+
+    if (adv.enabled && adv.startDelaySec > 0) {
+      append(`⏱ [${tag}] opóźnienie startu ${fmtDur(adv.startDelaySec * 1000)}`);
+      await wait(adv.startDelaySec * 1000);
+      if (stopRef.current) {
+        append(`■ [${tag}] zatrzymano`);
+        return;
+      }
+    }
     do {
       if (stopRef.current) break;
+      // Stop After — message count / time limit
+      if (adv.enabled && adv.stopAfterCount > 0 && sendIdx >= adv.stopAfterCount) {
+        append(`■ [${tag}] osiągnięto limit ${adv.stopAfterCount} wiadomości — koniec kampanii`);
+        break;
+      }
+      if (adv.enabled && adv.stopAfterMin > 0 && Date.now() - startedAt >= adv.stopAfterMin * 60000) {
+        append(`■ [${tag}] osiągnięto limit czasu ${adv.stopAfterMin} min — koniec kampanii`);
+        break;
+      }
       const qMs = quietWaitMs(quiet);
       if (qMs > 0) {
         append(`☾ [${tag}] godziny ciszy — pauza ${fmtDur(qMs)} (symulacja snu)`);
@@ -506,6 +649,8 @@ export default function App() {
           append(`✓ [${tag}] wysłano`);
           recordHistory(tag, t.channelId, content || `[embed] ${t.embed.title}`, true, res.status);
           bumpDaily(tag);
+          scheduleAutoActions(t, seed, res.id, tag);
+          if (adaptiveMult > 1) adaptiveMult = Math.max(1, adaptiveMult * 0.85); // slowly recover
           sentCount++;
           sendIdx++;
           if (userMode && preset.coffee && sentCount >= nextCoffee) {
@@ -523,10 +668,18 @@ export default function App() {
           if (res.status === 1015) {
             const backoff = Math.max(300000, Math.round((res.retryAfter ?? 300) * 1000));
             append(`⏸ [${tag}] cloudflare 1015 · przerwa ${(backoff / 1000).toFixed(0)}s (długi backoff)`);
+            if (adv.enabled && adv.adaptive) {
+              adaptiveMult = Math.min(5, adaptiveMult * 1.5);
+              append(`↑ [${tag}] adaptacja: interwał ×${adaptiveMult.toFixed(2)}`);
+            }
             await wait(backoff);
           } else if (res.status === 429) {
             const backoff = Math.max(30000, Math.round((res.retryAfter ?? 30) * 1000));
             append(`⏸ [${tag}] limit żądań · przerwa ${(backoff / 1000).toFixed(0)}s`);
+            if (adv.enabled && adv.adaptive) {
+              adaptiveMult = Math.min(5, adaptiveMult * 1.4);
+              append(`↑ [${tag}] adaptacja: interwał ×${adaptiveMult.toFixed(2)}`);
+            }
             await wait(backoff);
           } else if (res.status === 401 || res.status === 403) {
             append(`■ [${tag}] token nieprawidłowy/zabroniony — zatrzymuję wszystko`);
@@ -542,12 +695,12 @@ export default function App() {
         recordHistory(tag, t.channelId, content, false, 0, err instanceof Error ? err.message : String(err));
       }
       if (!t.loop || stopRef.current) break;
-      let baseMs = Math.max(1000, t.delaySec * 1000);
+      let baseMs = Math.max(1000, t.delaySec * 1000) * adaptiveMult;
       if (userMode && preset.warmup && sendIdx < 3) {
         baseMs = Math.round(baseMs * [2.4, 1.7, 1.3][sendIdx]);
         append(`↷ [${tag}] rozgrzewka tempa ×${[2.4, 1.7, 1.3][sendIdx]}`);
       }
-      const w = userMode ? humanDelayMs(baseMs, preset.jitterPct) : jitter(baseMs, preset.jitterPct);
+      const w = userMode ? humanDelayMs(baseMs, effJitter) : jitter(baseMs, effJitter);
       append(`⏱ [${tag}] następna za ${(w / 1000).toFixed(1)}s`);
       await wait(w);
     } while (t.loop && !stopRef.current);
@@ -800,6 +953,61 @@ export default function App() {
                   </p>
                 )}
               </Panel>
+
+              <Panel label={`00b // biblioteka szablonów [${templates.length}]`}>
+                <p className="mb-3 font-mono text-[10px] leading-relaxed text-muted-foreground">
+                  zapisz gotowe treści wiadomości (ze spintaxem i zmiennymi) i wstawiaj je jednym
+                  kliknięciem w dowolnej kampanii — przez przycisk <span className="text-accent">▾ szablon</span>.
+                </p>
+                <div className="grid gap-2 sm:grid-cols-[1fr_2fr_auto]">
+                  <input
+                    value={tplName}
+                    onChange={(e) => setTplName(e.target.value)}
+                    placeholder="nazwa szablonu"
+                    data-testid="template-name-input"
+                    className="rounded-sm border border-border bg-input px-2 py-1.5 font-mono text-xs text-foreground outline-none focus:border-primary"
+                  />
+                  <input
+                    value={tplText}
+                    onChange={(e) => setTplText(e.target.value)}
+                    placeholder="treść szablonu, np. {Hej|Cześć}! Nowy event {dzien}!"
+                    data-testid="template-text-input"
+                    className="rounded-sm border border-border bg-input px-2 py-1.5 font-mono text-xs text-foreground outline-none focus:border-primary"
+                  />
+                  <Button
+                    variant="outline"
+                    type="button"
+                    onClick={onSaveTemplate}
+                    data-testid="template-save-btn"
+                    className="rounded-sm border border-primary/40 bg-primary/10 px-3 py-1.5 font-mono text-[10px] uppercase tracking-wider text-primary transition-colors hover:bg-primary/20"
+                  >
+                    <BookMarked className="size-3" /> zapisz
+                  </Button>
+                </div>
+                {templates.length > 0 && (
+                  <div className="mt-3 space-y-1.5" data-testid="template-list">
+                    {templates.map((tpl) => (
+                      <div
+                        key={tpl.id}
+                        data-testid={`template-item-${tpl.id}`}
+                        className="flex items-center gap-2 rounded-sm border border-border bg-input/40 px-2.5 py-1.5"
+                      >
+                        <span className="w-28 shrink-0 truncate font-mono text-[11px] font-bold text-primary">{tpl.name}</span>
+                        <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-muted-foreground">{tpl.text}</span>
+                        <Button
+                          variant="outline"
+                          type="button"
+                          onClick={() => onDeleteTemplate(tpl.id)}
+                          data-testid={`template-delete-${tpl.id}`}
+                          className="shrink-0 font-mono text-[10px] uppercase tracking-wider text-destructive hover:underline"
+                        >
+                          ✕
+                        </Button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </Panel>
             </TabsContent>
             <TabsContent value="campaigns" className="space-y-6">
               <Panel label="01 // autoryzacja">
@@ -941,9 +1149,40 @@ export default function App() {
                         className="mt-1 w-full rounded-sm border border-border bg-input px-2 py-1.5 font-mono text-xs text-foreground outline-none focus:border-primary"
                         placeholder="np. 123456789012345678"
                       />
-                      <label className="mt-2 block font-mono text-[9px] uppercase tracking-wider text-muted-foreground">
-                        wiadomość <span className="text-accent">{"· {a|b} + zmienne {data} {licznik}"}</span>
-                      </label>
+                      <div className="mt-2 flex items-center justify-between gap-2">
+                        <label className="block font-mono text-[9px] uppercase tracking-wider text-muted-foreground">
+                          wiadomość <span className="text-accent">{"· {a|b} + zmienne {data} {licznik}"}</span>
+                        </label>
+                        <div className="flex items-center gap-1.5">
+                          {templates.length > 0 && (
+                            <select
+                              value=""
+                              onChange={(e) => {
+                                const tpl = templates.find((x) => x.id === e.target.value);
+                                if (tpl) insertTemplate(t.id, tpl.text);
+                                e.target.value = "";
+                              }}
+                              data-testid={`campaign-template-select-${t.id}`}
+                              className="rounded-sm border border-border bg-input px-1.5 py-1 font-mono text-[10px] text-muted-foreground outline-none focus:border-primary"
+                            >
+                              <option value="">▾ szablon</option>
+                              {templates.map((tpl) => (
+                                <option key={tpl.id} value={tpl.id}>{tpl.name}</option>
+                              ))}
+                            </select>
+                          )}
+                          <Button
+                            variant="outline"
+                            type="button"
+                            onClick={() => setAiTargetId(t.id)}
+                            data-testid={`campaign-ai-btn-${t.id}`}
+                            title="Napisz lub ulepsz wiadomość z pomocą AI"
+                            className="rounded-sm border border-accent/40 bg-accent/10 px-2 py-1 font-mono text-[10px] uppercase tracking-wider text-accent transition-colors hover:bg-accent/20"
+                          >
+                            <Sparkles className="size-3" /> AI
+                          </Button>
+                        </div>
+                      </div>
                       <textarea
                         value={t.message}
                         onChange={(e) => updateTarget(t.id, { message: e.target.value })}
@@ -1040,6 +1279,145 @@ export default function App() {
                               className="w-full rounded-sm border border-border bg-input px-2 py-1.5 font-mono text-xs text-foreground outline-none focus:border-primary"
                               placeholder="url obrazka (https://...)"
                             />
+                          </div>
+                        )}
+                      </div>
+
+                      <div className="mt-2 rounded-sm border border-border bg-input/30 p-2.5" data-testid={`campaign-advanced-${t.id}`}>
+                        <label className="flex items-center gap-2 font-mono text-[9px] uppercase tracking-wider text-muted-foreground">
+                          <input
+                            type="checkbox"
+                            checked={t.advanced.enabled}
+                            onChange={(e) => updateTarget(t.id, { advanced: { ...t.advanced, enabled: e.target.checked } })}
+                            className="accent-primary"
+                            data-testid={`campaign-advanced-toggle-${t.id}`}
+                          />
+                          <SlidersHorizontal className="size-3 text-accent" />
+                          ustawienia zaawansowane
+                        </label>
+                        {t.advanced.enabled && (
+                          <div className="mt-2 space-y-2.5" data-testid={`campaign-advanced-body-${t.id}`}>
+                            <div className="grid gap-2 sm:grid-cols-3">
+                              <div>
+                                <label className="block font-mono text-[9px] uppercase tracking-wider text-muted-foreground">
+                                  start delay (s)
+                                </label>
+                                <input
+                                  type="number"
+                                  min={0}
+                                  value={t.advanced.startDelaySec}
+                                  onChange={(e) => updateTarget(t.id, { advanced: { ...t.advanced, startDelaySec: Math.max(0, Number(e.target.value) || 0) } })}
+                                  data-testid={`campaign-adv-startdelay-${t.id}`}
+                                  className="mt-1 w-full rounded-sm border border-border bg-input px-2 py-1.5 font-mono text-xs text-foreground outline-none focus:border-primary"
+                                />
+                              </div>
+                              <div>
+                                <label className="block font-mono text-[9px] uppercase tracking-wider text-muted-foreground">
+                                  jitter (%) 0=auto
+                                </label>
+                                <input
+                                  type="number"
+                                  min={0}
+                                  max={100}
+                                  value={t.advanced.jitterPct}
+                                  onChange={(e) => updateTarget(t.id, { advanced: { ...t.advanced, jitterPct: Math.max(0, Math.min(100, Number(e.target.value) || 0)) } })}
+                                  data-testid={`campaign-adv-jitter-${t.id}`}
+                                  className="mt-1 w-full rounded-sm border border-border bg-input px-2 py-1.5 font-mono text-xs text-foreground outline-none focus:border-primary"
+                                />
+                              </div>
+                              <label className="flex items-end gap-2 pb-1.5 font-mono text-[10px] text-muted-foreground">
+                                <input
+                                  type="checkbox"
+                                  checked={t.advanced.adaptive}
+                                  onChange={(e) => updateTarget(t.id, { advanced: { ...t.advanced, adaptive: e.target.checked } })}
+                                  className="accent-primary"
+                                  data-testid={`campaign-adv-adaptive-${t.id}`}
+                                />
+                                adaptacja limitu
+                              </label>
+                            </div>
+                            <div className="grid gap-2 sm:grid-cols-2">
+                              <div>
+                                <label className="block font-mono text-[9px] uppercase tracking-wider text-muted-foreground">
+                                  stop po X wiadomościach (0=bez)
+                                </label>
+                                <input
+                                  type="number"
+                                  min={0}
+                                  value={t.advanced.stopAfterCount}
+                                  onChange={(e) => updateTarget(t.id, { advanced: { ...t.advanced, stopAfterCount: Math.max(0, Number(e.target.value) || 0) } })}
+                                  data-testid={`campaign-adv-stopcount-${t.id}`}
+                                  className="mt-1 w-full rounded-sm border border-border bg-input px-2 py-1.5 font-mono text-xs text-foreground outline-none focus:border-primary"
+                                />
+                              </div>
+                              <div>
+                                <label className="block font-mono text-[9px] uppercase tracking-wider text-muted-foreground">
+                                  stop po X minutach (0=bez)
+                                </label>
+                                <input
+                                  type="number"
+                                  min={0}
+                                  value={t.advanced.stopAfterMin}
+                                  onChange={(e) => updateTarget(t.id, { advanced: { ...t.advanced, stopAfterMin: Math.max(0, Number(e.target.value) || 0) } })}
+                                  data-testid={`campaign-adv-stopmin-${t.id}`}
+                                  className="mt-1 w-full rounded-sm border border-border bg-input px-2 py-1.5 font-mono text-xs text-foreground outline-none focus:border-primary"
+                                />
+                              </div>
+                            </div>
+                            <div className="rounded-sm border border-border/60 bg-background/40 p-2">
+                              <label className="flex items-center gap-2 font-mono text-[9px] uppercase tracking-wider text-muted-foreground">
+                                <input
+                                  type="checkbox"
+                                  checked={t.advanced.autoEdit.enabled}
+                                  onChange={(e) => updateTarget(t.id, { advanced: { ...t.advanced, autoEdit: { ...t.advanced.autoEdit, enabled: e.target.checked } } })}
+                                  className="accent-primary"
+                                  data-testid={`campaign-adv-autoedit-toggle-${t.id}`}
+                                />
+                                auto-edycja wysłanej wiadomości
+                              </label>
+                              {t.advanced.autoEdit.enabled && (
+                                <div className="mt-2 grid gap-2 sm:grid-cols-[6rem_1fr]">
+                                  <input
+                                    type="number"
+                                    min={2}
+                                    value={t.advanced.autoEdit.delaySec}
+                                    onChange={(e) => updateTarget(t.id, { advanced: { ...t.advanced, autoEdit: { ...t.advanced.autoEdit, delaySec: Math.max(2, Number(e.target.value) || 2) } } })}
+                                    data-testid={`campaign-adv-autoedit-delay-${t.id}`}
+                                    title="po ilu sekundach edytować"
+                                    className="rounded-sm border border-border bg-input px-2 py-1.5 font-mono text-xs text-foreground outline-none focus:border-primary"
+                                  />
+                                  <input
+                                    value={t.advanced.autoEdit.text}
+                                    onChange={(e) => updateTarget(t.id, { advanced: { ...t.advanced, autoEdit: { ...t.advanced.autoEdit, text: e.target.value } } })}
+                                    data-testid={`campaign-adv-autoedit-text-${t.id}`}
+                                    placeholder="nowa treść po edycji (działa {a|b})"
+                                    className="rounded-sm border border-border bg-input px-2 py-1.5 font-mono text-xs text-foreground outline-none focus:border-primary"
+                                  />
+                                </div>
+                              )}
+                            </div>
+                            <label className="flex items-center gap-2 font-mono text-[10px] text-muted-foreground">
+                              <input
+                                type="checkbox"
+                                checked={t.advanced.autoDelete.enabled}
+                                onChange={(e) => updateTarget(t.id, { advanced: { ...t.advanced, autoDelete: { ...t.advanced.autoDelete, enabled: e.target.checked } } })}
+                                className="accent-primary"
+                                data-testid={`campaign-adv-autodelete-toggle-${t.id}`}
+                              />
+                              auto-usuń po
+                              <input
+                                type="number"
+                                min={2}
+                                value={t.advanced.autoDelete.afterSec}
+                                onChange={(e) => updateTarget(t.id, { advanced: { ...t.advanced, autoDelete: { ...t.advanced.autoDelete, afterSec: Math.max(2, Number(e.target.value) || 2) } } })}
+                                data-testid={`campaign-adv-autodelete-sec-${t.id}`}
+                                className="w-20 rounded-sm border border-border bg-input px-2 py-1 font-mono text-xs text-foreground outline-none focus:border-primary"
+                              />
+                              sek.
+                            </label>
+                            <p className="font-mono text-[9px] leading-snug text-warn">
+                              ⚠ auto-edycja/usuwanie wymaga tokena z prawem do wiadomości; botem działa tylko dla własnych wiadomości.
+                            </p>
                           </div>
                         )}
                       </div>
@@ -1237,6 +1615,16 @@ export default function App() {
                     ♪ test alertu
                   </Button>
                 </div>
+                <label className="mt-3 flex items-center gap-2 font-mono text-[10px] text-muted-foreground">
+                  <input
+                    type="checkbox"
+                    checked={alerts.logs}
+                    onChange={(e) => setAlerts({ ...alerts, logs: e.target.checked })}
+                    className="accent-primary"
+                    data-testid="alert-logs-toggle"
+                  />
+                  wysyłaj dziennik aktywności na webhook (zdarzenia ✓/✗ w czasie rzeczywistym)
+                </label>
               </Panel>
             </TabsContent>
             <TabsContent value="preview">
@@ -1307,6 +1695,13 @@ export default function App() {
           </p>
         </Tabs>
       </div>
+
+      <AiComposeModal
+        open={!!aiTargetId}
+        current={targets.find((t) => t.id === aiTargetId)?.message || ""}
+        onClose={() => setAiTargetId(null)}
+        onApply={(text, replace) => aiTargetId && onAiApply(aiTargetId, text, replace)}
+      />
     </div>
   );
 }

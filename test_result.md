@@ -101,3 +101,104 @@
 #====================================================================================================
 # Testing Data - Main Agent and testing sub agent both should log testing data below this section
 #====================================================================================================
+## user_problem_statement: "dodaj do tego pare ciekawych funkcji" — rozbudowa GHOST.SEND o: asystent treści AI (gpt-5.4), biblioteka szablonów, heatmapa aktywności, ustawienia zaawansowane per kampania (start delay, jitter %, adaptacja limitu, stop after, auto-edit, auto-delete), webhook logi.
+
+## backend:
+##   - task: "AI compose endpoint /api/ai/compose"
+##     implemented: true
+##     working: "NA"
+##     file: "backend/server.py"
+##     stuck_count: 0
+##     priority: "high"
+##     needs_retesting: true
+##     status_history:
+##         -working: "NA"
+##         -agent: "main"
+##         -comment: "POST /api/ai/compose {mode:generate|improve|spintax, brief, current, tone, model} -> {ok,text}. emergentintegrations + EMERGENT_LLM_KEY, gpt-5.4. Zweryfikowane curl: generate zwrocilo polski tekst."
+##   - task: "Discord edit/delete endpoints + send returns message id"
+##     implemented: true
+##     working: "NA"
+##     file: "backend/server.py"
+##     stuck_count: 0
+##     priority: "high"
+##     needs_retesting: true
+##     status_history:
+##         -working: "NA"
+##         -agent: "main"
+##         -comment: "POST /api/discord/edit i /api/discord/delete (patch/delete do Discord API). /api/discord/send zwraca teraz id wiadomosci. Walidacja channelId/messageId regexem."
+##   - task: "History heatmap /api/history/heatmap"
+##     implemented: true
+##     working: "NA"
+##     file: "backend/server.py"
+##     stuck_count: 0
+##     priority: "medium"
+##     needs_retesting: true
+##     status_history:
+##         -working: "NA"
+##         -agent: "main"
+##         -comment: "GET /api/history/heatmap -> grid[7][24] (pn..nd x 0..23), peak, total. Zweryfikowane curl: zwraca zerowa siatke gdy brak danych."
+
+## frontend:
+##   - task: "AI compose modal per campaign"
+##     implemented: true
+##     working: "NA"
+##     file: "frontend/src/components/AiComposeModal.jsx, App.js"
+##     stuck_count: 0
+##     priority: "high"
+##     needs_retesting: true
+##     status_history:
+##         -working: "NA"
+##         -agent: "main"
+##         -comment: "Przycisk AI (campaign-ai-btn-{id}) otwiera modal z trybami generuj/ulepsz/spintax, wybor tonu, generowanie, zastap/dopisz. Zweryfikowane e2e przez skrypt: generate zwrocilo wynik (ai-result-text)."
+##   - task: "Template library + insert into campaign"
+##     implemented: true
+##     working: "NA"
+##     file: "frontend/src/App.js"
+##     stuck_count: 0
+##     priority: "medium"
+##     needs_retesting: true
+##     status_history:
+##         -working: "NA"
+##         -agent: "main"
+##         -comment: "Zakladka Konfiguracje: panel bibliteki szablonow (localStorage ghost-send:templates). Wstawianie przez select ▾ szablon przy kazdej kampanii."
+##   - task: "Advanced per-campaign settings"
+##     implemented: true
+##     working: "NA"
+##     file: "frontend/src/App.js"
+##     stuck_count: 0
+##     priority: "high"
+##     needs_retesting: true
+##     status_history:
+##         -working: "NA"
+##         -agent: "main"
+##         -comment: "Start delay, jitter% (0=auto), adaptacja limitu, stop po X wiadomosciach/minutach, auto-edit (delay+tekst), auto-delete (sek). Logika w runCampaign/scheduleAutoActions."
+##   - task: "Activity heatmap panel + webhook logs toggle"
+##     implemented: true
+##     working: "NA"
+##     file: "frontend/src/components/HeatmapPanel.jsx, App.js"
+##     stuck_count: 0
+##     priority: "medium"
+##     needs_retesting: true
+##     status_history:
+##         -working: "NA"
+##         -agent: "main"
+##         -comment: "Heatmapa w zakladce Statystyki. Toggle alert-logs-toggle wysyla zdarzenia dziennika na webhook przez /api/alert/relay."
+
+## metadata:
+##   created_by: "main_agent"
+##   version: "2.0"
+##   test_sequence: 1
+
+## test_plan:
+##   current_focus:
+##     - "AI compose endpoint /api/ai/compose"
+##     - "Discord edit/delete endpoints + send returns message id"
+##     - "AI compose modal per campaign"
+##     - "Advanced per-campaign settings"
+##   stuck_tasks: []
+##   test_all: false
+##   test_priority: "high_first"
+
+## agent_communication:
+##     -agent: "main"
+##     -message: "Dodano paczki funkcji. Backend: /api/ai/compose, /api/discord/edit, /api/discord/delete (send zwraca id), /api/history/heatmap. Frontend: modal AI, szablony, ustawienia zaawansowane, heatmapa, webhook logi. Prosze przetestowac backend (edit/delete zwroca 401 z fake tokenem - to OK, wazna jest walidacja i ksztalt odpowiedzi; compose wymaga EMERGENT_LLM_KEY i musi zwrocic text). Frontend: otwieranie modalu AI i generowanie, zapis/wstawienie szablonu, wlaczanie ustawien zaawansowanych, heatmapa w Statystykach. Token Discord tylko w przegladarce - do testow wysylki uzyj fake tokena, oczekiwany 401 w dzienniku."

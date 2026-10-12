@@ -3,6 +3,7 @@ import axios from "axios";
 import { motion } from "framer-motion";
 import { Button } from "@/components/ui/button";
 import { RefreshCw, Trash2, BarChart3, Download } from "lucide-react";
+import { HeatmapPanel } from "@/components/HeatmapPanel";
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 
@@ -144,6 +145,8 @@ export function StatsPanel() {
           ))}
         </div>
       </section>
+
+      <HeatmapPanel refreshKey={items.length} />
 
       {stats?.byCampaign?.length > 0 && (
         <section className="panel-shadow rounded-md border border-border bg-card/60 p-5">

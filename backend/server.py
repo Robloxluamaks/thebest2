@@ -13,6 +13,7 @@ import logging
 from pathlib import Path
 from pydantic import BaseModel
 from typing import Optional, Dict
+from datetime import datetime, timezone, timedelta
 import httpx
 
 ROOT_DIR = Path(__file__).parent
@@ -228,6 +229,73 @@ async def fetch_emoji_map(data: EmojiFetchInput):
             }
     except Exception as err:
         return {"ok": False, "status": 0, "error": str(err)}
+
+
+class HistoryEntryIn(BaseModel):
+    campaign: str
+    channelId: str
+    message: str
+    ok: bool
+    status: int = 0
+    error: Optional[str] = None
+
+
+@api_router.post("/history")
+async def save_history(entry: HistoryEntryIn):
+    doc = entry.model_dump()
+    doc["message"] = doc["message"][:500]
+    doc["timestamp"] = datetime.now(timezone.utc).isoformat()
+    await db.send_history.insert_one(doc)
+    return {"ok": True}
+
+
+@api_router.get("/history")
+async def list_history(limit: int = 50):
+    limit = max(1, min(200, limit))
+    items = await db.send_history.find({}, {"_id": 0}).sort("timestamp", -1).to_list(limit)
+    return {"items": items}
+
+
+@api_router.get("/history/stats")
+async def history_stats():
+    total_sent = await db.send_history.count_documents({"ok": True})
+    total_failed = await db.send_history.count_documents({"ok": False})
+    rows = await db.send_history.aggregate([
+        {"$group": {"_id": "$campaign", "sent": {"$sum": {"$cond": ["$ok", 1, 0]}}, "failed": {"$sum": {"$cond": ["$ok", 0, 1]}}}},
+        {"$sort": {"sent": -1}},
+        {"$limit": 8},
+    ]).to_list(8)
+    by_campaign = [
+        {"name": r["_id"] or "kampania", "sent": r["sent"], "failed": r["failed"]}
+        for r in rows
+    ]
+    today = datetime.now(timezone.utc).date()
+    since = (today - timedelta(days=6)).isoformat()
+    raw = await db.send_history.find(
+        {"timestamp": {"$gte": since}}, {"_id": 0, "timestamp": 1, "ok": 1}
+    ).to_list(10000)
+    counts = {}
+    for r in raw:
+        d = r["timestamp"][:10]
+        c = counts.setdefault(d, {"sent": 0, "failed": 0})
+        c["sent" if r.get("ok") else "failed"] += 1
+    by_day = []
+    for i in range(6, -1, -1):
+        d = (today - timedelta(days=i)).isoformat()
+        c = counts.get(d, {"sent": 0, "failed": 0})
+        by_day.append({"date": d, "label": f"{d[8:10]}.{d[5:7]}", "sent": c["sent"], "failed": c["failed"]})
+    return {
+        "totalSent": total_sent,
+        "totalFailed": total_failed,
+        "byCampaign": by_campaign,
+        "byDay": by_day,
+    }
+
+
+@api_router.delete("/history")
+async def clear_history():
+    await db.send_history.delete_many({})
+    return {"ok": True}
 
 
 app.include_router(api_router)

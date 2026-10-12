@@ -1,11 +1,14 @@
 import { useEffect, useRef, useState } from "react";
 import axios from "axios";
 import Lenis from "lenis";
-import { motion } from "framer-motion";
+import { AnimatePresence, motion } from "framer-motion";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
 import { CampaignPreview } from "@/components/CampaignPreview";
-import { Layers, Eye, FolderOpen, Terminal, Trash2 } from "lucide-react";
+import { StatsPanel } from "@/components/StatsPanel";
+import { WelcomeScreen } from "@/components/WelcomeScreen";
+import { DAY_LABELS, fmtDur, nextRunInMs, resolveSpintax } from "@/lib/ghost";
+import { Layers, Eye, BarChart3, FolderOpen, Terminal, Trash2 } from "lucide-react";
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 
@@ -16,6 +19,7 @@ const newTarget = () => ({
   message: "",
   delaySec: 60,
   loop: true,
+  schedule: { mode: "now", time: "21:00", days: [1, 2, 3, 4, 5] },
 });
 
 function jitter(base, jitterPct) {
@@ -55,19 +59,27 @@ function humanTypingMs(text) {
 
 const PROFILES_KEY = "ghost-send:profiles";
 const SESSION_KEY = "ghost-send:session";
+const ENTERED_KEY = "ghost-send:entered";
 
 const TICKER = [
   "kampanie równoległe",
   "tryb stealth",
   "podgląd na żywo",
-  "profile konfiguracji",
-  "dziennik sesji",
+  "warianty spintax",
+  "harmonogram wysyłek",
+  "historia wysyłek",
   "custom emoji",
-  "bot + user token",
   "jitter anty-wykrywanie",
 ];
 
 export default function App() {
+  const [entered, setEntered] = useState(() => {
+    try {
+      return sessionStorage.getItem(ENTERED_KEY) === "1";
+    } catch {
+      return false;
+    }
+  });
   const [activeTab, setActiveTab] = useState("campaigns");
   const [token, setToken] = useState("");
   const [isBot, setIsBot] = useState(true);
@@ -120,6 +132,13 @@ export default function App() {
     } catch {}
   }, [isBot, stealth, targets]);
 
+  const handleEnter = () => {
+    try {
+      sessionStorage.setItem(ENTERED_KEY, "1");
+    } catch {}
+    setEntered(true);
+  };
+
   const applyConfig = (c) => {
     if (typeof c.isBot === "boolean") setIsBot(c.isBot);
     if (c.stealth) setStealth(c.stealth);
@@ -128,6 +147,7 @@ export default function App() {
         c.targets.map((t) => ({
           ...newTarget(),
           ...t,
+          schedule: { ...newTarget().schedule, ...(t.schedule || {}) },
           id: Math.random().toString(36).slice(2, 9),
         }))
       );
@@ -234,6 +254,19 @@ export default function App() {
   const removeTarget = (id) =>
     setTargets((ts) => (ts.length > 1 ? ts.filter((t) => t.id !== id) : ts));
 
+  const recordHistory = (tag, channelId, message, ok, status, error) => {
+    axios
+      .post(`${API}/history`, {
+        campaign: tag,
+        channelId,
+        message: message.slice(0, 500),
+        ok,
+        status,
+        error: error ? String(error).slice(0, 200) : null,
+      })
+      .catch(() => {});
+  };
+
   const onLoadEmojis = async () => {
     if (!token.trim()) {
       append("✗ WYMAGANY TOKEN aby pobrać emoji");
@@ -261,14 +294,15 @@ export default function App() {
     const preset = STEALTH[stealth];
     do {
       if (stopRef.current) break;
-      const tMs = preset.humanTyping ? humanTypingMs(t.message) : 1500;
+      const content = resolveSpintax(t.message);
+      const tMs = preset.humanTyping ? humanTypingMs(content) : 1500;
       if (preset.typing) append(`✎ [${tag}] pisanie (~${(tMs / 1000).toFixed(1)}s)`);
       try {
         const res = (
           await axios.post(`${API}/discord/send`, {
             token,
             channelId: t.channelId,
-            message: t.message,
+            message: content,
             isBot,
             typing: preset.typing,
             typingMs: tMs,
@@ -278,9 +312,11 @@ export default function App() {
         if (res.ok) {
           setStats((s) => ({ ...s, sent: s.sent + 1 }));
           append(`✓ [${tag}] wysłano`);
+          recordHistory(tag, t.channelId, content, true, res.status);
         } else {
           setStats((s) => ({ ...s, failed: s.failed + 1 }));
           append(`✗ [${tag}] ${res.status}: ${String(res.error).slice(0, 80)}`);
+          recordHistory(tag, t.channelId, content, false, res.status, res.error);
           if (res.status === 1015) {
             const backoff = Math.max(300000, Math.round((res.retryAfter ?? 300) * 1000));
             append(`⏸ [${tag}] cloudflare 1015 · przerwa ${(backoff / 1000).toFixed(0)}s (długi backoff)`);
@@ -299,6 +335,7 @@ export default function App() {
       } catch (err) {
         setStats((s) => ({ ...s, failed: s.failed + 1 }));
         append(`✗ [${tag}] ${err instanceof Error ? err.message : String(err)}`);
+        recordHistory(tag, t.channelId, content, false, 0, err instanceof Error ? err.message : String(err));
       }
       if (!t.loop || stopRef.current) break;
       const baseMs = Math.max(1000, t.delaySec * 1000);
@@ -307,6 +344,23 @@ export default function App() {
       await wait(w);
     } while (t.loop && !stopRef.current);
     append(`■ [${tag}] zatrzymano`);
+  };
+
+  const runScheduled = async (t) => {
+    const tag = t.name.trim() || `#${t.channelId.slice(-6)}`;
+    while (!stopRef.current) {
+      const ms = nextRunInMs(t.schedule);
+      if (ms > 0) {
+        append(
+          `⏱ [${tag}] start zaplanowany za ${fmtDur(ms)} (${new Date(Date.now() + ms).toLocaleString("pl-PL")})`
+        );
+        await wait(ms);
+        if (stopRef.current) break;
+      }
+      await runCampaign(t);
+      if (t.schedule?.mode !== "weekly" || t.loop || stopRef.current) break;
+      append(`↷ [${tag}] tryb cykliczny — czekam na kolejny termin`);
+    }
   };
 
   const onSubmit = async (e) => {
@@ -329,7 +383,7 @@ export default function App() {
     append(`▶ start ${valid.length} kampanii · tryb: ${STEALTH[stealth].label}`);
     setActiveTab("logs");
     try {
-      await Promise.all(valid.map((t) => runCampaign(t)));
+      await Promise.all(valid.map((t) => runScheduled(t)));
       append("■ wszystkie kampanie zatrzymane");
     } finally {
       setRunning(false);
@@ -339,6 +393,10 @@ export default function App() {
 
   return (
     <div className="relative min-h-screen overflow-hidden" data-testid="ghost-send-app">
+      <AnimatePresence>
+        {!entered && <WelcomeScreen key="welcome" onEnter={handleEnter} />}
+      </AnimatePresence>
+
       <div className="pointer-events-none absolute inset-0 grid-bg opacity-40" />
       <div className="relative mx-auto max-w-6xl px-6 py-10">
         <header className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
@@ -370,7 +428,7 @@ export default function App() {
               transition={{ delay: 0.5, duration: 0.8 }}
               className="mt-2 max-w-lg font-mono text-xs text-muted-foreground"
             >
-              kampanie discord · podgląd wiadomości · zapisane konfiguracje
+              kampanie discord · harmonogram · spintax · historia wysyłek
             </motion.p>
           </div>
           <motion.div
@@ -390,13 +448,16 @@ export default function App() {
         <Tabs value={activeTab} onValueChange={setActiveTab} className="mt-8">
           <TabsList
             aria-label="Widoki aplikacji"
-            className="grid h-auto w-full grid-cols-2 gap-1 rounded-md border border-border bg-secondary/40 p-1 sm:grid-cols-4"
+            className="grid h-auto w-full grid-cols-2 gap-1 rounded-md border border-border bg-secondary/40 p-1 sm:grid-cols-5"
           >
             <TabsTrigger value="campaigns" className="gap-2 py-3" data-testid="tab-campaigns">
               <Layers className="size-4" />Kampanie
             </TabsTrigger>
             <TabsTrigger value="preview" className="gap-2 py-3" data-testid="tab-preview">
               <Eye className="size-4" />Podgląd
+            </TabsTrigger>
+            <TabsTrigger value="stats" className="gap-2 py-3" data-testid="tab-stats">
+              <BarChart3 className="size-4" />Statystyki
             </TabsTrigger>
             <TabsTrigger value="configs" className="gap-2 py-3" data-testid="tab-configs">
               <FolderOpen className="size-4" />Konfiguracje
@@ -582,7 +643,9 @@ export default function App() {
                 <p className="mb-3 font-mono text-[10px] leading-relaxed text-muted-foreground">
                   każda kampania działa niezależnie we własnej pętli z własnym opóźnieniem. użyj{" "}
                   <span className="text-accent">:nazwa_emoji:</span> w wiadomości — custom emoji
-                  rozwiążą się automatycznie po wczytaniu.
+                  rozwiążą się automatycznie po wczytaniu. składnia{" "}
+                  <span className="text-accent">{"{wariant1|wariant2}"}</span> losuje treść przy
+                  każdej wysyłce.
                 </p>
                 <div className="space-y-3">
                   {targets.map((t, i) => (
@@ -626,7 +689,7 @@ export default function App() {
                         placeholder="np. 123456789012345678"
                       />
                       <label className="mt-2 block font-mono text-[9px] uppercase tracking-wider text-muted-foreground">
-                        wiadomość
+                        wiadomość <span className="text-accent">{"· {a|b|c} = losowy wariant"}</span>
                       </label>
                       <textarea
                         value={t.message}
@@ -634,7 +697,7 @@ export default function App() {
                         rows={2}
                         data-testid={`campaign-message-input-${t.id}`}
                         className="mt-1 w-full resize-none rounded-sm border border-border bg-input px-2 py-1.5 font-mono text-xs text-foreground outline-none focus:border-primary"
-                        placeholder="co wysłać..."
+                        placeholder="co wysłać... np. {Cześć|Hej|Siema} wszyscy!"
                       />
                       <div className="mt-2 grid grid-cols-[1fr_auto] items-end gap-3">
                         <div>
@@ -663,6 +726,76 @@ export default function App() {
                           pętla
                         </label>
                       </div>
+                      <div className="mt-2 grid gap-3 sm:grid-cols-[1fr_auto]">
+                        <div>
+                          <label className="block font-mono text-[9px] uppercase tracking-wider text-muted-foreground">
+                            start kampanii
+                          </label>
+                          <select
+                            value={t.schedule.mode}
+                            onChange={(e) =>
+                              updateTarget(t.id, { schedule: { ...t.schedule, mode: e.target.value } })
+                            }
+                            data-testid={`campaign-schedule-mode-${t.id}`}
+                            className="mt-1 w-full rounded-sm border border-border bg-input px-2 py-1.5 font-mono text-xs text-foreground outline-none focus:border-primary"
+                          >
+                            <option value="now">natychmiast</option>
+                            <option value="at">o godzinie</option>
+                            <option value="weekly">w wybranych dniach tygodnia</option>
+                          </select>
+                        </div>
+                        {t.schedule.mode !== "now" && (
+                          <div>
+                            <label className="block font-mono text-[9px] uppercase tracking-wider text-muted-foreground">
+                              godzina
+                            </label>
+                            <input
+                              type="time"
+                              value={t.schedule.time}
+                              onChange={(e) =>
+                                updateTarget(t.id, { schedule: { ...t.schedule, time: e.target.value } })
+                              }
+                              data-testid={`campaign-schedule-time-${t.id}`}
+                              className="mt-1 w-full rounded-sm border border-border bg-input px-2 py-1.5 font-mono text-xs text-foreground outline-none focus:border-primary"
+                            />
+                          </div>
+                        )}
+                      </div>
+                      {t.schedule.mode === "weekly" && (
+                        <div className="mt-2 flex flex-wrap gap-1" data-testid={`campaign-schedule-days-${t.id}`}>
+                          {DAY_LABELS.map(([label, val]) => {
+                            const active = t.schedule.days.includes(val);
+                            return (
+                              <Button
+                                variant="outline"
+                                key={val}
+                                type="button"
+                                onClick={() =>
+                                  updateTarget(t.id, {
+                                    schedule: {
+                                      ...t.schedule,
+                                      days: active
+                                        ? t.schedule.days.filter((d) => d !== val)
+                                        : [...t.schedule.days, val],
+                                    },
+                                  })
+                                }
+                                data-testid={`campaign-schedule-day-${t.id}-${val}`}
+                                className={`rounded-sm border px-2.5 py-1 font-mono text-[10px] uppercase tracking-wider transition-colors ${
+                                  active
+                                    ? "border-primary/50 bg-primary/10 text-primary"
+                                    : "border-border bg-input text-muted-foreground hover:border-primary/30"
+                                }`}
+                              >
+                                {label}
+                              </Button>
+                            );
+                          })}
+                          <span className="ml-1 self-center font-mono text-[9px] text-muted-foreground">
+                            bez pętli: wysyłka powtarza się w każdy zaznaczony dzień
+                          </span>
+                        </div>
+                      )}
                     </div>
                   ))}
                 </div>
@@ -708,6 +841,9 @@ export default function App() {
             </TabsContent>
             <TabsContent value="preview">
               <CampaignPreview targets={targets} />
+            </TabsContent>
+            <TabsContent value="stats">
+              <StatsPanel />
             </TabsContent>
             <TabsContent value="logs">
               <div className="mb-3 flex items-center justify-between">

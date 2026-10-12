@@ -1,5 +1,6 @@
-import { Hash, MessageSquare, Clock, Repeat2, Bot } from "lucide-react";
+import { Hash, MessageSquare, Clock, Repeat2, Bot, CalendarClock, Sparkles } from "lucide-react";
 import { motion } from "framer-motion";
+import { hasSpintax, resolveSpintax, scheduleLabel } from "@/lib/ghost";
 
 export function CampaignPreview({ targets }) {
   return (
@@ -33,11 +34,23 @@ export function CampaignPreview({ targets }) {
                 <p className={`mt-2 whitespace-pre-wrap break-words text-sm leading-relaxed [overflow-wrap:anywhere] ${target.message.trim() ? "text-foreground" : "text-muted-foreground"}`}>
                   {target.message.trim() ? target.message : "Brak wiadomości"}
                 </p>
+                {hasSpintax(target.message) && (
+                  <p
+                    data-testid={`preview-variant-${target.id}`}
+                    className="mt-2 whitespace-pre-wrap break-words border-l-2 border-accent/50 pl-2 text-sm leading-relaxed text-accent [overflow-wrap:anywhere]"
+                  >
+                    wylosowany wariant: {resolveSpintax(target.message)}
+                  </p>
+                )}
               </div>
             </div>
             <footer className="flex flex-wrap gap-x-5 gap-y-2 border-t border-border px-4 py-3 font-mono text-xs text-muted-foreground">
               <span className="flex items-center gap-2"><Clock className="size-3.5" />{target.delaySec} s · minimum</span>
               <span className="flex items-center gap-2"><Repeat2 className="size-3.5" />{target.loop ? "Powtarzanie" : "Jednorazowo"}</span>
+              <span className="flex items-center gap-2"><CalendarClock className="size-3.5" />{scheduleLabel(target.schedule)}</span>
+              {hasSpintax(target.message) && (
+                <span className="flex items-center gap-2 text-accent"><Sparkles className="size-3.5" />spintax</span>
+              )}
             </footer>
           </motion.article>
         ))}

@@ -23,11 +23,12 @@
 
 ## Zaimplementowane
 - 2026-10-12: pełny port aplikacji (zakładki Kampanie/Podgląd/Konfiguracje/Dziennik), UI po polsku, neonowo-terminalowy motyw z oryginału, animowane wejście hero (masked reveal), marquee statusowe, lenis smooth scroll, logo-duch SVG jako favicon, data-testid na wszystkich elementach interaktywnych. Zweryfikowane: walidacja bez tokena, wysyłka z fałszywym tokenem (401 w dzienniku, licznik błędów), zapis/wczytanie profilu, podgląd na żywo, layout 375/768/1366px.
+- 2026-10-12: kinetyczny ekran powitalny (GhostMark, boot log, CTA, exit slide-up; sessionStorage `ghost-send:entered`); historia wysyłek w MongoDB (`send_history`, endpointy POST/GET/DELETE /api/history + /api/history/stats) z zakładką Statystyki (sumy, wykres 7 dni, wg kampanii, lista wpisów); spintax `{a|b|c}` losowany przy każdej wysyłce + podgląd wariantu; harmonogram startu per kampania (natychmiast / o godzinie / dni tygodnia, cyklicznie przy pętli wyłączonej). Lib: `src/lib/ghost.js`. Zweryfikowane e2e: welcome→panel, zapis historii przy 401, statystyki, log "start zaplanowany za 4h 13m", abort.
 
 ## Backlog
 - P0: nic krytycznego
-- P1: harmonogram kampanii (start o godzinie / cron), losowe warianty wiadomości (spintax), historia wysyłek w MongoDB
-- P2: tryb podglądu embedów, statystyki wykresów (recharts), powiadomienie dźwiękowe przy błędzie
+- P1: powiadomienie dźwiękowe/webhook przy błędzie krytycznym, szablony wiadomości ze zmiennymi (np. {user})
+- P2: tryb podglądu embedów, wykres godzinowy aktywności (recharts), eksport historii do CSV
 
 ## Kolejne kroki
 - Rozbudowa wg wskazówek użytkownika

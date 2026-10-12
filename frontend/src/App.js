@@ -8,7 +8,7 @@ import { CampaignPreview } from "@/components/CampaignPreview";
 import { StatsPanel } from "@/components/StatsPanel";
 import { WelcomeScreen } from "@/components/WelcomeScreen";
 import { DAY_LABELS, fmtDur, nextRunInMs, resolveSpintax } from "@/lib/ghost";
-import { Layers, Eye, BarChart3, FolderOpen, Terminal, Trash2 } from "lucide-react";
+import { Layers, Eye, BarChart3, FolderOpen, Terminal, Trash2, MoonStar } from "lucide-react";
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 
@@ -27,27 +27,71 @@ function jitter(base, jitterPct) {
   return Math.max(0, Math.round(base + Math.random() * delta));
 }
 
+// Normal (Gaussian) distribution — human pacing clusters around the mean
+// instead of being perfectly uniform.
+function gauss() {
+  let u = 0, v = 0;
+  while (!u) u = Math.random();
+  while (!v) v = Math.random();
+  return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+}
+
+function humanDelayMs(baseMs, jitterPct) {
+  const j = Math.abs(gauss()) * (jitterPct / 100) * baseMs;
+  return Math.round(baseMs + Math.min(j, baseMs * 0.6));
+}
+
+function randInt(a, b) {
+  return a + Math.floor(Math.random() * (b - a + 1));
+}
+
+// Returns ms to wait when the current time falls inside the quiet-hours window.
+function quietWaitMs(q) {
+  if (!q?.enabled) return 0;
+  const [fh, fm] = (q.from || "01:00").split(":").map(Number);
+  const [th, tm] = (q.to || "07:00").split(":").map(Number);
+  const now = new Date();
+  const mins = now.getHours() * 60 + now.getMinutes();
+  const from = fh * 60 + fm;
+  const to = th * 60 + tm;
+  const inWindow = from <= to ? mins >= from && mins < to : mins >= from || mins < to;
+  if (!inWindow) return 0;
+  const end = new Date(now);
+  end.setHours(th, tm, 0, 0);
+  if (end <= now) end.setDate(end.getDate() + 1);
+  return end - now;
+}
+
 const STEALTH = {
   low: {
     label: "Szybki",
-    blurb: "Wysyła szybko, z minimalnym opóźnieniem. Wyższe ryzyko przy tokenach użytkownika.",
+    blurb: "Minimalne opóźnienia, stały rytm wysyłki. Najwyższe ryzyko przy tokenach użytkownika.",
     typing: false,
     humanTyping: false,
+    burst: false,
     jitterPct: 8,
+    coffee: null,
+    warmup: false,
   },
   balanced: {
     label: "Zbalansowany",
-    blurb: "Wskaźnik pisania + do +12% dodatkowego opóźnienia. Dobre ustawienie domyślne.",
+    blurb: "Wskaźnik pisania + naturalne (gaussowskie) opóźnienia. USER: stały odcisk klienta i przerwy kawowe.",
     typing: true,
     humanTyping: false,
+    burst: false,
     jitterPct: 12,
+    coffee: { every: [12, 20], pause: [120, 300] },
+    warmup: false,
   },
   max: {
     label: "Max Stealth",
-    blurb: "Realistyczny czas pisania wg długości wiadomości + do +15% dodatkowego opóźnienia.",
+    blurb: "Pisanie z pauzami jak człowiek, rozgrzewka tempa, dłuższe przerwy kawowe. Najwolniej = najbezpieczniej.",
     typing: true,
     humanTyping: true,
+    burst: true,
     jitterPct: 15,
+    coffee: { every: [8, 14], pause: [180, 480] },
+    warmup: true,
   },
 };
 
@@ -60,6 +104,7 @@ function humanTypingMs(text) {
 const PROFILES_KEY = "ghost-send:profiles";
 const SESSION_KEY = "ghost-send:session";
 const ENTERED_KEY = "ghost-send:entered";
+const QUIET_KEY = "ghost-send:quiet";
 
 const TICKER = [
   "kampanie równoległe",
@@ -69,7 +114,9 @@ const TICKER = [
   "harmonogram wysyłek",
   "historia wysyłek",
   "custom emoji",
-  "jitter anty-wykrywanie",
+  "godziny ciszy",
+  "przerwy kawowe",
+  "stały odcisk klienta",
 ];
 
 export default function App() {
@@ -92,6 +139,7 @@ export default function App() {
   const waitAbortersRef = useRef(new Set());
   const [log, setLog] = useState([]);
   const [stats, setStats] = useState({ sent: 0, failed: 0 });
+  const [quiet, setQuiet] = useState({ enabled: false, from: "01:00", to: "07:00" });
 
   const [profiles, setProfiles] = useState({});
   const [profileName, setProfileName] = useState("");
@@ -119,6 +167,8 @@ export default function App() {
       if (raw) setProfiles(JSON.parse(raw));
       const last = localStorage.getItem(SESSION_KEY);
       if (last) applyConfig(JSON.parse(last));
+      const q = localStorage.getItem(QUIET_KEY);
+      if (q) setQuiet({ enabled: false, from: "01:00", to: "07:00", ...JSON.parse(q) });
     } catch {}
     hydratedRef.current = true;
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -131,6 +181,13 @@ export default function App() {
       localStorage.setItem(SESSION_KEY, JSON.stringify(snap));
     } catch {}
   }, [isBot, stealth, targets]);
+
+  useEffect(() => {
+    if (!hydratedRef.current) return;
+    try {
+      localStorage.setItem(QUIET_KEY, JSON.stringify(quiet));
+    } catch {}
+  }, [quiet]);
 
   const handleEnter = () => {
     try {
@@ -289,14 +346,26 @@ export default function App() {
     }
   };
 
-  const runCampaign = async (t) => {
+  const runCampaign = async (t, seed) => {
     const tag = t.name.trim() || `#${t.channelId.slice(-6)}`;
     const preset = STEALTH[stealth];
+    const userMode = !isBot;
+    const userBurst = userMode && preset.burst;
+    let sentCount = 0;
+    let sendIdx = 0;
+    let nextCoffee = preset.coffee ? randInt(preset.coffee.every[0], preset.coffee.every[1]) : Infinity;
     do {
       if (stopRef.current) break;
+      const qMs = quietWaitMs(quiet);
+      if (qMs > 0) {
+        append(`☾ [${tag}] godziny ciszy — pauza ${fmtDur(qMs)} (symulacja snu)`);
+        await wait(qMs);
+        if (stopRef.current) break;
+      }
       const content = resolveSpintax(t.message);
       const tMs = preset.humanTyping ? humanTypingMs(content) : 1500;
-      if (preset.typing) append(`✎ [${tag}] pisanie (~${(tMs / 1000).toFixed(1)}s)`);
+      if (preset.typing)
+        append(`✎ [${tag}] pisanie (~${(tMs / 1000).toFixed(1)}s)${userBurst ? " · z pauzami" : ""}`);
       try {
         const res = (
           await axios.post(`${API}/discord/send`, {
@@ -306,6 +375,8 @@ export default function App() {
             isBot,
             typing: preset.typing,
             typingMs: tMs,
+            typingBurst: userBurst,
+            profileSeed: userMode ? seed : undefined,
             emojiMap: Object.keys(emojiMap).length ? emojiMap : undefined,
           })
         ).data;
@@ -313,6 +384,16 @@ export default function App() {
           setStats((s) => ({ ...s, sent: s.sent + 1 }));
           append(`✓ [${tag}] wysłano`);
           recordHistory(tag, t.channelId, content, true, res.status);
+          sentCount++;
+          sendIdx++;
+          if (userMode && preset.coffee && sentCount >= nextCoffee) {
+            sentCount = 0;
+            nextCoffee = randInt(preset.coffee.every[0], preset.coffee.every[1]);
+            const pause = randInt(preset.coffee.pause[0], preset.coffee.pause[1]) * 1000;
+            append(`☕ [${tag}] przerwa kawowa ${fmtDur(pause)} — jak człowiek`);
+            await wait(pause);
+            if (stopRef.current) break;
+          }
         } else {
           setStats((s) => ({ ...s, failed: s.failed + 1 }));
           append(`✗ [${tag}] ${res.status}: ${String(res.error).slice(0, 80)}`);
@@ -338,8 +419,12 @@ export default function App() {
         recordHistory(tag, t.channelId, content, false, 0, err instanceof Error ? err.message : String(err));
       }
       if (!t.loop || stopRef.current) break;
-      const baseMs = Math.max(1000, t.delaySec * 1000);
-      const w = jitter(baseMs, preset.jitterPct);
+      let baseMs = Math.max(1000, t.delaySec * 1000);
+      if (userMode && preset.warmup && sendIdx < 3) {
+        baseMs = Math.round(baseMs * [2.4, 1.7, 1.3][sendIdx]);
+        append(`↷ [${tag}] rozgrzewka tempa ×${[2.4, 1.7, 1.3][sendIdx]}`);
+      }
+      const w = userMode ? humanDelayMs(baseMs, preset.jitterPct) : jitter(baseMs, preset.jitterPct);
       append(`⏱ [${tag}] następna za ${(w / 1000).toFixed(1)}s`);
       await wait(w);
     } while (t.loop && !stopRef.current);
@@ -348,6 +433,7 @@ export default function App() {
 
   const runScheduled = async (t) => {
     const tag = t.name.trim() || `#${t.channelId.slice(-6)}`;
+    const seed = Math.floor(Math.random() * 10 ** 6);
     while (!stopRef.current) {
       const ms = nextRunInMs(t.schedule);
       if (ms > 0) {
@@ -357,7 +443,7 @@ export default function App() {
         await wait(ms);
         if (stopRef.current) break;
       }
-      await runCampaign(t);
+      await runCampaign(t, seed);
       if (t.schedule?.mode !== "weekly" || t.loop || stopRef.current) break;
       append(`↷ [${tag}] tryb cykliczny — czekam na kolejny termin`);
     }
@@ -380,7 +466,7 @@ export default function App() {
     setRunning(true);
     stopRef.current = false;
     setStats({ sent: 0, failed: 0 });
-    append(`▶ start ${valid.length} kampanii · tryb: ${STEALTH[stealth].label}`);
+    append(`▶ start ${valid.length} kampanii · tryb: ${STEALTH[stealth].label}${isBot ? "" : " · USER stealth+"}`);
     setActiveTab("logs");
     try {
       await Promise.all(valid.map((t) => runScheduled(t)));
@@ -832,10 +918,48 @@ export default function App() {
                     );
                   })}
                 </div>
+
+                <div className="mt-3 rounded-md border border-border bg-input/50 p-3">
+                  <label className="flex items-center gap-2 font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
+                    <input
+                      type="checkbox"
+                      checked={quiet.enabled}
+                      onChange={(e) => setQuiet({ ...quiet, enabled: e.target.checked })}
+                      className="accent-primary"
+                      data-testid="quiet-toggle"
+                    />
+                    <MoonStar className="size-3.5 text-accent" />
+                    godziny ciszy — symulacja snu
+                  </label>
+                  {quiet.enabled && (
+                    <div className="mt-2 flex flex-wrap items-center gap-2" data-testid="quiet-settings">
+                      <input
+                        type="time"
+                        value={quiet.from}
+                        onChange={(e) => setQuiet({ ...quiet, from: e.target.value })}
+                        data-testid="quiet-from"
+                        className="rounded-sm border border-border bg-input px-2 py-1 font-mono text-xs text-foreground outline-none focus:border-primary"
+                      />
+                      <span className="font-mono text-[10px] text-muted-foreground">→</span>
+                      <input
+                        type="time"
+                        value={quiet.to}
+                        onChange={(e) => setQuiet({ ...quiet, to: e.target.value })}
+                        data-testid="quiet-to"
+                        className="rounded-sm border border-border bg-input px-2 py-1 font-mono text-xs text-foreground outline-none focus:border-primary"
+                      />
+                      <span className="font-mono text-[9px] leading-snug text-muted-foreground">
+                        w tym oknie kampanie czekają do końca ciszy zamiast wysyłać
+                      </span>
+                    </div>
+                  )}
+                </div>
+
                 <p className="mt-3 font-mono text-[10px] leading-relaxed text-muted-foreground">
-                  każda kampania zapętla się z własnym opóźnieniem, dopóki nie naciśniesz{" "}
-                  <span className="text-destructive">stop</span>. nie zamykaj karty — zamknięcie
-                  zatrzymuje wszystko.
+                  token <span className="text-accent">USER</span> dodatkowo: stały odcisk
+                  przeglądarki na całą kampanię (5 profili), opóźnienia gaussowskie, przerwy kawowe
+                  wg poziomu, a w Max Stealth pisanie z pauzami i rozgrzewka tempa pierwszych
+                  wiadomości. nie zamykaj karty — zamknięcie zatrzymuje wszystko.
                 </p>
               </Panel>
             </TabsContent>
@@ -914,7 +1038,8 @@ export default function App() {
 function logColor(line) {
   if (line.includes("✓")) return "text-primary";
   if (line.includes("✗") || line.includes("ZATRZYMANO")) return "text-destructive";
-  if (line.includes("⏸") || line.includes("⏱")) return "text-warn";
+  if (line.includes("⏸") || line.includes("⏱") || line.includes("☕") || line.includes("☾"))
+    return "text-warn";
   if (line.includes("✎") || line.includes("↷")) return "text-accent";
   if (line.includes("──") || line.includes("▶") || line.includes("■")) return "text-primary/80";
   return "text-muted-foreground";

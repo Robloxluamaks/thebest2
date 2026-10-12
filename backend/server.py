@@ -28,6 +28,9 @@ api_router = APIRouter(prefix="/api")
 
 DISCORD_API = "https://discord.com/api/v10"
 
+# Pool of realistic desktop/browser client fingerprints (user tokens only).
+# The frontend pins one profile per campaign via profileSeed — a real client
+# never changes its User-Agent between requests.
 CLIENT_PROFILES = [
     {
         "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) discord/1.0.9042 Chrome/124.0.6367.243 Electron/30.2.0 Safari/537.36",
@@ -42,6 +45,7 @@ CLIENT_PROFILES = [
             "client_build_number": 320472,
             "client_event_source": None,
         },
+        "extra": {},
     },
     {
         "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) discord/0.0.312 Chrome/124.0.6367.243 Electron/30.2.0 Safari/537.36",
@@ -56,6 +60,60 @@ CLIENT_PROFILES = [
             "client_build_number": 320472,
             "client_event_source": None,
         },
+        "extra": {},
+    },
+    {
+        "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+        "props": {
+            "os": "Windows",
+            "browser": "Chrome",
+            "browser_version": "126.0.0.0",
+            "release_channel": "stable",
+            "os_version": "10.0.19045",
+            "os_arch": "x64",
+            "system_locale": "en-US",
+            "client_build_number": 320472,
+            "client_event_source": None,
+        },
+        "extra": {
+            "sec-ch-ua": '"Chromium";v="126", "Google Chrome";v="126", "Not-A.Brand";v="99"',
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": '"Windows"',
+        },
+    },
+    {
+        "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+        "props": {
+            "os": "Mac OS X",
+            "browser": "Chrome",
+            "browser_version": "126.0.0.0",
+            "release_channel": "stable",
+            "os_version": "14.5.0",
+            "os_arch": "x64",
+            "system_locale": "en-US",
+            "client_build_number": 320472,
+            "client_event_source": None,
+        },
+        "extra": {
+            "sec-ch-ua": '"Chromium";v="126", "Google Chrome";v="126", "Not-A.Brand";v="99"',
+            "sec-ch-ua-mobile": "?0",
+            "sec-ch-ua-platform": '"macOS"',
+        },
+    },
+    {
+        "ua": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) discord/0.0.61 Chrome/124.0.6367.243 Electron/30.2.0 Safari/537.36",
+        "props": {
+            "os": "Linux",
+            "browser": "Discord Client",
+            "release_channel": "stable",
+            "client_version": "0.0.61",
+            "os_version": "",
+            "os_arch": "x64",
+            "system_locale": "en-US",
+            "client_build_number": 320472,
+            "client_event_source": None,
+        },
+        "extra": {},
     },
 ]
 
@@ -73,6 +131,8 @@ class SendInput(BaseModel):
     isBot: bool = True
     typing: bool = False
     typingMs: int = 1500
+    typingBurst: bool = False
+    profileSeed: Optional[int] = None
     emojiMap: Optional[Dict[str, EmojiEntry]] = None
 
 
@@ -81,7 +141,7 @@ class EmojiFetchInput(BaseModel):
     isBot: bool = True
 
 
-def build_headers(token: str, is_bot: bool, channel_id: Optional[str] = None) -> dict:
+def build_headers(token: str, is_bot: bool, channel_id: Optional[str] = None, profile_seed: Optional[int] = None) -> dict:
     headers = {
         "Authorization": f"Bot {token}" if is_bot else token,
         "Content-Type": "application/json",
@@ -89,7 +149,8 @@ def build_headers(token: str, is_bot: bool, channel_id: Optional[str] = None) ->
     if is_bot:
         headers["User-Agent"] = "DiscordBot (https://ghost.send, 1.0)"
     else:
-        profile = random.choice(CLIENT_PROFILES)
+        idx = (profile_seed if profile_seed is not None else random.randint(0, 10**6)) % len(CLIENT_PROFILES)
+        profile = CLIENT_PROFILES[idx]
         headers["User-Agent"] = profile["ua"]
         headers["X-Super-Properties"] = base64.b64encode(
             json.dumps(profile["props"]).encode()
@@ -102,6 +163,7 @@ def build_headers(token: str, is_bot: bool, channel_id: Optional[str] = None) ->
         headers["Sec-Fetch-Mode"] = "cors"
         headers["Sec-Fetch-Site"] = "same-origin"
         headers["Origin"] = "https://discord.com"
+        headers.update(profile.get("extra", {}))
         if channel_id:
             headers["Referer"] = f"https://discord.com/channels/@me/{channel_id}"
     return headers
@@ -130,27 +192,53 @@ async def send_discord_message(data: SendInput):
             return f"<{'a' if e.animated else ''}:{m.group(1)}:{e.id}>"
         content = re.sub(r":([a-zA-Z0-9_]{2,32}):", repl, content)
 
-    headers = build_headers(data.token, data.isBot, data.channelId)
+    headers = build_headers(data.token, data.isBot, data.channelId, data.profileSeed)
 
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(90.0)) as http:
             if data.typing:
                 typing_wait_ms = max(400, min(15000, data.typingMs))
-                try:
-                    await http.post(f"{DISCORD_API}/channels/{data.channelId}/typing", headers=headers)
-                except Exception:
-                    pass
-                elapsed = 0.0
                 target = typing_wait_ms / 1000.0
-                while elapsed < target:
-                    chunk = min(9.0, target - elapsed)
-                    await asyncio.sleep(chunk)
-                    elapsed += chunk
-                    if elapsed < target:
-                        try:
-                            await http.post(f"{DISCORD_API}/channels/{data.channelId}/typing", headers=headers)
-                        except Exception:
-                            pass
+                typing_url = f"{DISCORD_API}/channels/{data.channelId}/typing"
+                if data.typingBurst and not data.isBot:
+                    # Human burst pattern: type, stop to think (indicator off),
+                    # type again — instead of one continuous typing indicator.
+                    elapsed = 0.0
+                    on = True
+                    try:
+                        await http.post(typing_url, headers=headers)
+                    except Exception:
+                        pass
+                    while elapsed < target:
+                        chunk = random.uniform(0.9, 2.6) if on else random.uniform(0.5, 1.4)
+                        chunk = min(chunk, target - elapsed, 9.0)
+                        await asyncio.sleep(chunk)
+                        elapsed += chunk
+                        if elapsed >= target:
+                            break
+                        if on:
+                            on = False
+                        else:
+                            on = True
+                            try:
+                                await http.post(typing_url, headers=headers)
+                            except Exception:
+                                pass
+                else:
+                    try:
+                        await http.post(typing_url, headers=headers)
+                    except Exception:
+                        pass
+                    elapsed = 0.0
+                    while elapsed < target:
+                        chunk = min(9.0, target - elapsed)
+                        await asyncio.sleep(chunk)
+                        elapsed += chunk
+                        if elapsed < target:
+                            try:
+                                await http.post(typing_url, headers=headers)
+                            except Exception:
+                                pass
 
             body = {"content": content, "tts": False, "flags": 0}
             if not data.isBot:
